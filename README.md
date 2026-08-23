@@ -1,12 +1,12 @@
 # Deep
 
-Deep adalah **agent harness untuk riset berbasis bukti** yang ditulis dengan Rust. Produk ini tidak dirancang sebagai chatbot umum. Tujuan utamanya adalah melakukan penelusuran web, membaca sumber asli, mencatat bukti, menghubungkan bukti ke klaim, menguji kontradiksi, lalu menghasilkan kesimpulan yang tidak lebih kuat daripada bukti yang tersedia.
+Deep adalah **agent harness untuk riset berbasis bukti** yang ditulis dengan Rust. Produk ini tidak dirancang sebagai chatbot umum. Tujuan utamanya adalah melakukan penelusuran web, membaca sumber asli, mencatat bukti, memisahkan klaim dari dugaan, menghubungkan entitas dan relasi, mengejar lead, menguji kontradiksi, lalu menghasilkan kesimpulan yang tidak lebih kuat daripada bukti yang tersedia.
 
 > Evidence first. Conclusions second.
 
 ## Status
 
-Repositori ini masih berada pada tahap MVP. Fondasi yang sudah tersedia meliputi:
+Repositori ini berada pada tahap MVP. Fondasi yang sudah tersedia meliputi:
 
 - TUI berbasis `ratatui` dan `crossterm`;
 - agent loop asinkron berbasis `tokio`;
@@ -14,27 +14,43 @@ Repositori ini masih berada pada tahap MVP. Fondasi yang sudah tersedia meliputi
 - Firecrawl API v2 untuk `search`, `scrape`, `map`, `crawl`, status crawl, dan `interact`;
 - research workspace berbasis SQLite;
 - claim → evidence linkage;
+- relationship → evidence linkage;
+- entitas, relationships, leads, dan notes sebagai objek workspace terstruktur;
 - deteksi sumber dengan konten identik melalui SHA-256;
 - aturan bahwa hasil pencarian hanya dipakai untuk discovery, bukan sebagai evidence;
-- status epistemik klaim yang disimpan secara terstruktur;
+- status epistemik klaim dan relasi yang divalidasi oleh harness;
+- calculator, date math, statistik dasar, dan text diff yang deterministik;
 - credential profiles yang dapat ditumpuk dan dipilih langsung dari TUI;
 - CI untuk `rustfmt`, `clippy`, dan test.
 
 ## Filosofi inti
 
-Deep memisahkan tiga hal yang sering tercampur pada agent riset biasa:
+Deep memisahkan komponen yang sering tercampur pada agent riset biasa:
 
 ```text
 LLM investigator
       ↓
-research workspace
+research actions
+      ↓
+structured workspace
       ↓
 epistemic constraints
+      ↓
+report
 ```
 
-LLM boleh memilih jalur investigasi, menghasilkan query, memilih sumber, dan mengusulkan perubahan status klaim. Namun harness tetap membatasi perubahan state tertentu. Sebagai contoh, klaim tidak dapat menjadi `VERIFIED`, `SUPPORTED`, atau `DISPROVEN` sebelum mempunyai evidence yang benar-benar terhubung.
+LLM boleh memilih jalur investigasi, menghasilkan query, memilih sumber, membuat claim, entity, relationship, atau lead, serta mengusulkan perubahan status. Namun harness tetap mengendalikan transisi epistemik tertentu.
 
-Hasil `search` juga tidak dapat langsung dimasukkan sebagai evidence. URL harus dibaca terlebih dahulu melalui `scrape`, baru kutipan dari sumber tersebut dapat dicatat.
+Sebagai contoh:
+
+- `VERIFIED` dan `SUPPORTED` membutuhkan evidence yang mendukung;
+- `DISPROVEN` membutuhkan evidence yang membantah;
+- `CONFLICTING` membutuhkan evidence pada kedua sisi;
+- aturan yang sama berlaku pada relationship;
+- hasil `search` tidak dapat langsung dijadikan evidence;
+- notes tidak pernah dianggap evidence dengan sendirinya.
+
+URL harus dibaca melalui `scrape` sebelum kutipan dari halaman tersebut dapat masuk ke evidence ledger.
 
 ## Menjalankan
 
@@ -110,27 +126,28 @@ Implementasi MVP saat ini masih menyimpan credential dalam berkas JSON lokal. Ar
 
 ## TUI
 
-Layar investigasi utama dibagi menjadi beberapa state nyata, bukan pseudo-progress.
+Layar investigasi utama menampilkan state nyata, bukan pseudo-progress.
 
 ```text
 ┌ CASE / OBJECTIVE ────────────────────────────────────────────┐
 ├ ACTIVITY ─────────────────────┬ CLAIMS ──────────────────────┤
 │ SEARCH                       │ C1 VERIFIED                  │
 │ SCRAPE                       │ C2 UNRESOLVED                │
-│ EVIDENCE                     ├ SOURCES ─────────────────────┤
-│ VERIFY                       │ S1 ...                       │
-│ FOLLOW                       │ S2 ...                       │
+│ EVIDENCE                     ├ LEADS ───────────────────────┤
+│ ENTITY                       │ L1 ACTIVE                    │
+│ RELATIONSHIP                 ├ SOURCES ─────────────────────┤
+│ FOLLOW                       │ S1 PRIMARY                   │
 └──────────────────────────────┴───────────────────────────────┘
 ```
 
 Warna dipakai secara semantik:
 
-- cyan untuk operasi retrieval;
+- cyan untuk retrieval dan lead aktif;
 - hijau untuk evidence dan verifikasi;
-- kuning untuk claim, lead, dan state yang belum final;
-- merah untuk error, rejection, atau kegagalan;
-- ungu untuk sumber/entitas;
-- abu-abu untuk sumber duplikat.
+- kuning untuk claim atau lead yang belum final;
+- merah untuk contradiction, dead end, rejection, atau error;
+- ungu untuk entity dan relationship discovery;
+- abu-abu untuk sumber duplikat atau lead yang dibuang.
 
 TUI tidak menampilkan raw chain-of-thought model. Yang ditampilkan hanyalah event operasional yang benar-benar terjadi pada harness.
 
@@ -144,16 +161,34 @@ sources
 claims
 evidence
 claim_evidence
+entities
+relationships
+relationship_evidence
+leads
+notes
 events
 ```
 
 Source mempunyai `content_hash`. Jika dua URL menghasilkan konten yang sama, source berikutnya ditandai melalui `duplicate_of` sehingga URL tambahan tidak otomatis dianggap sebagai corroboration independen.
 
-Evidence hanya dapat dibuat jika `source_id` berasal dari source yang telah masuk ke case yang sama.
+Evidence hanya dapat dibuat jika source berasal dari case yang sama. Claim dan relationship juga hanya dapat ditautkan ke evidence dalam case yang sama.
 
-## Status klaim
+Entity dapat dihubungkan melalui relationship terarah. Relationship mulai dari `UNRESOLVED` dan tunduk pada constraint evidence yang sama seperti claim.
 
-Status yang saat ini didukung:
+Lead mempunyai state:
+
+```text
+OPEN
+ACTIVE
+EXHAUSTED
+DISCARDED
+```
+
+Dengan demikian agent dapat membedakan lead yang masih produktif, sedang dikerjakan, sudah mencapai jalan buntu, atau sengaja dibuang.
+
+## Status epistemik
+
+Status claim dan relationship yang saat ini didukung:
 
 ```text
 VERIFIED
@@ -165,7 +200,7 @@ INSUFFICIENT_EVIDENCE
 DEAD_END
 ```
 
-`VERIFIED`, `SUPPORTED`, dan `DISPROVEN` membutuhkan minimal satu evidence yang sudah dihubungkan ke klaim.
+Harness tidak memakai angka confidence semu sebagai pengganti evidence trail.
 
 ## Tool agent
 
@@ -178,15 +213,45 @@ map
 crawl
 crawl_status
 interact
+
 calculator
 date_days_between
+statistics
+text_diff
+
 record_claim
 record_evidence
 link_evidence
 set_claim_status
+
+record_entity
+record_relationship
+link_relationship_evidence
+set_relationship_status
+
+record_lead
+set_lead_status
+record_note
+
 finish_report
 reject_request
 ```
+
+`statistics` menyediakan operasi:
+
+```text
+sum
+mean
+median
+min
+max
+percentage_change
+standard_deviation
+percentile
+correlation
+```
+
+`text_diff` membandingkan dua versi teks secara line-based dan deterministik.
 
 Agent tidak mempunyai arbitrary shell, package manager, filesystem bebas, coding tools, atau multi-agent swarm.
 
@@ -196,11 +261,29 @@ Model diarahkan untuk berhenti ketika salah satu kondisi epistemik tercapai, ant
 
 Selain itu terdapat `MAX_AGENT_STEPS` sebagai guardrail operasional. Guardrail ini bukan definisi bahwa investigasi sudah selesai secara epistemik. Jika guardrail tercapai lebih dahulu, laporan menyatakan bahwa penghentian tersebut bersifat operasional.
 
+## Laporan akhir
+
+Report dibangun kembali dari state workspace, bukan hanya dari teks bebas model. MVP saat ini menampilkan:
+
+```text
+RESULT
+CLAIMS
+ENTITIES
+RELATIONSHIPS
+LEADS
+SOURCES
+LIMITATIONS
+CONCLUSION
+```
+
+Claim dan relationship mencantumkan jumlah evidence yang terhubung. Source duplikat tetap terlihat beserta origin record yang identik.
+
 ## Struktur proyek
 
 ```text
 src/
 ├── agent.rs           # investigator loop dan tool contract
+├── analysis_tools.rs  # statistik dan text diff deterministik
 ├── clients.rs         # OpenAI-compatible + Firecrawl
 ├── credentials.rs     # credential stack dan profile selection
 ├── store.rs           # SQLite research workspace
@@ -211,7 +294,8 @@ src/
     └── render.rs      # renderer investigation console
 
 migrations/
-└── 0001_init.sql
+├── 0001_init.sql
+└── 0002_epistemic_objects.sql
 ```
 
 ## Pengujian
@@ -228,4 +312,6 @@ Perintah yang sama dijalankan oleh GitHub Actions.
 
 ## Batas MVP saat ini
 
-Beberapa bagian PRD belum diimplementasikan penuh, khususnya entity graph, timeline engine, provenance graph lintas sumber, relationship objects, structured table operations, archive retrieval, DNS/RDAP, export investigation bundle, dan evaluator benchmark. Komponen tersebut sebaiknya ditambahkan setelah fondasi claim/evidence dan agent loop terbukti stabil.
+Beberapa kemampuan yang lebih lanjut belum diimplementasikan penuh, khususnya visualisasi entity graph interaktif, timeline engine, provenance graph yang mampu mengenali derivative source meskipun kontennya tidak identik, structured table operations, archive retrieval, DNS/RDAP, certificate transparency, export investigation bundle, semantic retrieval/vector database, dan evaluator benchmark yang lengkap.
+
+Komponen tersebut sebaiknya ditambahkan hanya setelah benchmark menunjukkan bahwa complexity tambahannya memberikan peningkatan kualitas riset yang dapat diukur.
