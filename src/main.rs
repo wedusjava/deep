@@ -1,4 +1,5 @@
 mod agent;
+mod analysis_tools;
 mod clients;
 mod credentials;
 mod store;
