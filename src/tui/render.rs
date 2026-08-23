@@ -269,7 +269,10 @@ fn running_header(frame: &mut Frame, app: &App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("   {running_agents} workers live   idle {}s", app.idle_for().as_secs()),
+                format!(
+                    "   {running_agents} workers live   idle {}s",
+                    app.idle_for().as_secs()
+                ),
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
@@ -593,7 +596,9 @@ fn footer(frame: &mut Frame, app: &App, area: Rect) {
         ])
     };
     let hints = match app.screen {
-        Screen::Running => "q quit  ·  parallel worker state  ·  transient upstream errors retry automatically",
+        Screen::Running => {
+            "q quit  ·  parallel worker state  ·  transient upstream errors retry automatically"
+        }
         Screen::Report => "↑↓ scroll  ·  PgUp/PgDn  ·  n new case  ·  h home  ·  q quit",
         Screen::Credentials => {
             "↑↓ select  ·  Enter activate  ·  l add LLM  ·  f add Firecrawl  ·  h home"
