@@ -1,8 +1,9 @@
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
-use reqwest::Client;
+use anyhow::{Context, Result, anyhow, bail};
+use reqwest::{Client, Method, StatusCode, header::RETRY_AFTER};
 use serde_json::{Value, json};
+use tokio::time::sleep;
 
 use crate::credentials::{FirecrawlProfile, LlmProfile};
 
@@ -10,6 +11,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LLM_TIMEOUT: Duration = Duration::from_secs(180);
 const FIRECRAWL_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_ERROR_CHARS: usize = 420;
+const MAX_REQUEST_ATTEMPTS: usize = 4;
+const BASE_RETRY_DELAY: Duration = Duration::from_millis(400);
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(8);
 
 #[derive(Clone)]
 pub struct OpenAiClient {
@@ -29,23 +33,43 @@ impl OpenAiClient {
     }
 
     pub async fn chat(&self, messages: &[Value], tools: &[Value]) -> Result<Value> {
-        let endpoint = join_endpoint(&self.profile.base_url, "chat/completions");
-        let response = self
-            .http
-            .post(endpoint)
-            .bearer_auth(&self.profile.api_key)
-            .json(&json!({
-                "model": self.profile.model,
-                "messages": messages,
-                "tools": tools,
-                "tool_choice": "auto",
-                "temperature": 0.1
-            }))
-            .send()
-            .await
-            .context("LLM request failed")?;
+        let body = json!({
+            "model": self.profile.model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "temperature": 0.1
+        });
+        self.post_chat(body).await
+    }
 
-        decode_json(response, "LLM").await
+    pub async fn complete(&self, system: &str, user: &str) -> Result<String> {
+        let body = json!({
+            "model": self.profile.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user}
+            ],
+            "temperature": 0.1
+        });
+        let response = self.post_chat(body).await?;
+        response
+            .pointer("/choices/0/message/content")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow!("LLM response did not contain choices[0].message.content"))
+    }
+
+    async fn post_chat(&self, body: Value) -> Result<Value> {
+        request_json_with_retry(
+            &self.http,
+            Method::POST,
+            join_endpoint(&self.profile.base_url, "chat/completions"),
+            &self.profile.api_key,
+            Some(&body),
+            "LLM",
+        )
+        .await
     }
 }
 
@@ -144,27 +168,98 @@ impl FirecrawlClient {
     }
 
     async fn post(&self, path: &str, body: Value) -> Result<Value> {
-        let response = self
-            .http
-            .post(join_endpoint(&self.profile.base_url, path))
-            .bearer_auth(&self.profile.api_key)
-            .json(&body)
-            .send()
-            .await
-            .context("Firecrawl request failed")?;
-        decode_json(response, "Firecrawl").await
+        request_json_with_retry(
+            &self.http,
+            Method::POST,
+            join_endpoint(&self.profile.base_url, path),
+            &self.profile.api_key,
+            Some(&body),
+            "Firecrawl",
+        )
+        .await
     }
 
     async fn get(&self, path: &str) -> Result<Value> {
-        let response = self
-            .http
-            .get(join_endpoint(&self.profile.base_url, path))
-            .bearer_auth(&self.profile.api_key)
-            .send()
-            .await
-            .context("Firecrawl request failed")?;
-        decode_json(response, "Firecrawl").await
+        request_json_with_retry(
+            &self.http,
+            Method::GET,
+            join_endpoint(&self.profile.base_url, path),
+            &self.profile.api_key,
+            None,
+            "Firecrawl",
+        )
+        .await
     }
+}
+
+async fn request_json_with_retry(
+    client: &Client,
+    method: Method,
+    url: String,
+    bearer_token: &str,
+    body: Option<&Value>,
+    service: &str,
+) -> Result<Value> {
+    for attempt in 1..=MAX_REQUEST_ATTEMPTS {
+        let mut request = client
+            .request(method.clone(), &url)
+            .bearer_auth(bearer_token);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+
+        match request.send().await {
+            Ok(response) => {
+                if is_retryable_status(response.status()) && attempt < MAX_REQUEST_ATTEMPTS {
+                    let delay = retry_after(&response).unwrap_or_else(|| retry_delay(attempt));
+                    sleep(delay).await;
+                    continue;
+                }
+                return decode_json(response, service).await;
+            }
+            Err(error) if is_retryable_error(&error) && attempt < MAX_REQUEST_ATTEMPTS => {
+                sleep(retry_delay(attempt)).await;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("{service} request failed"));
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "{service} request exhausted {MAX_REQUEST_ATTEMPTS} attempts"
+    ))
+}
+
+fn is_retryable_status(status: StatusCode) -> bool {
+    status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status.as_u16() == 425
+        || status.is_server_error()
+}
+
+fn is_retryable_error(error: &reqwest::Error) -> bool {
+    error.is_timeout() || error.is_connect()
+}
+
+fn retry_after(response: &reqwest::Response) -> Option<Duration> {
+    let seconds = response
+        .headers()
+        .get(RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    Some(Duration::from_secs(seconds).min(MAX_RETRY_DELAY))
+}
+
+fn retry_delay(attempt: usize) -> Duration {
+    let shift = attempt.saturating_sub(1).min(8) as u32;
+    let multiplier = 1u32 << shift;
+    BASE_RETRY_DELAY
+        .saturating_mul(multiplier)
+        .min(MAX_RETRY_DELAY)
 }
 
 async fn decode_json(response: reqwest::Response, service: &str) -> Result<Value> {
@@ -250,5 +345,19 @@ mod tests {
         let message = response_error_message(&body);
         assert!(message.chars().count() <= MAX_ERROR_CHARS);
         assert!(message.ends_with('…'));
+    }
+
+    #[test]
+    fn retries_only_transient_statuses() {
+        assert!(is_retryable_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_retryable_status(StatusCode::BAD_GATEWAY));
+        assert!(!is_retryable_status(StatusCode::UNAUTHORIZED));
+        assert!(!is_retryable_status(StatusCode::NOT_FOUND));
+    }
+
+    #[test]
+    fn backoff_is_bounded() {
+        assert_eq!(retry_delay(1), BASE_RETRY_DELAY);
+        assert!(retry_delay(10) <= MAX_RETRY_DELAY);
     }
 }
