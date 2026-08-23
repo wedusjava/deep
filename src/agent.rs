@@ -387,12 +387,7 @@ async fn execute_tool(
             let values = number_array(args, "values")?;
             let other_values = optional_number_array(args, "other_values")?;
             let percentile = args.get("p").and_then(Value::as_f64);
-            let result = statistics(
-                operation,
-                &values,
-                other_values.as_deref(),
-                percentile,
-            )?;
+            let result = statistics(operation, &values, other_values.as_deref(), percentile)?;
             emit(workspace, tx, case_id, "STATISTICS", operation).await?;
             Ok(ToolOutcome::Continue(result.to_string()))
         }
@@ -400,7 +395,14 @@ async fn execute_tool(
             let left = required_str(args, "left")?;
             let right = required_str(args, "right")?;
             let diff = text_diff(left, right)?;
-            emit(workspace, tx, case_id, "DIFF", "Compared two text versions.").await?;
+            emit(
+                workspace,
+                tx,
+                case_id,
+                "DIFF",
+                "Compared two text versions.",
+            )
+            .await?;
             Ok(ToolOutcome::Continue(diff))
         }
         "record_claim" => {
@@ -547,7 +549,9 @@ async fn execute_tool(
                 &format!("E{evidence_id} {relation} R{relationship_id}"),
             )
             .await?;
-            Ok(ToolOutcome::Continue("relationship evidence linked".to_owned()))
+            Ok(ToolOutcome::Continue(
+                "relationship evidence linked".to_owned(),
+            ))
         }
         "set_relationship_status" => {
             let relationship_id = required_i64(args, "relationship_id")?;
@@ -575,7 +579,14 @@ async fn execute_tool(
                 let store = workspace.lock().await;
                 store.record_lead(case_id, description)?
             };
-            emit(workspace, tx, case_id, "FOLLOW", &format!("L{id} {description}")).await?;
+            emit(
+                workspace,
+                tx,
+                case_id,
+                "FOLLOW",
+                &format!("L{id} {description}"),
+            )
+            .await?;
             let _ = tx.send(ResearchEvent::Lead {
                 id,
                 description: description.to_owned(),
@@ -697,7 +708,10 @@ fn build_report(
         output.push_str("No structured entities were recorded.\n");
     } else {
         for entity in entities {
-            output.push_str(&format!("E{}  {}  [{}]\n", entity.id, entity.name, entity.kind));
+            output.push_str(&format!(
+                "E{}  {}  [{}]\n",
+                entity.id, entity.name, entity.kind
+            ));
             if let Some(description) = entity.description {
                 output.push_str(&format!("    {}\n", description.trim()));
             }
@@ -732,7 +746,10 @@ fn build_report(
         output.push_str("No structured leads were recorded.\n");
     } else {
         for lead in leads {
-            output.push_str(&format!("L{}  {}\n    {}\n", lead.id, lead.status, lead.description));
+            output.push_str(&format!(
+                "L{}  {}\n    {}\n",
+                lead.id, lead.status, lead.description
+            ));
             if let Some(rationale) = lead.rationale {
                 output.push_str(&format!("    rationale: {}\n", rationale.trim()));
             }

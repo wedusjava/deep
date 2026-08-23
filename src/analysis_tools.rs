@@ -180,8 +180,14 @@ mod tests {
     #[test]
     fn statistics_are_deterministic() {
         let values = [1.0, 2.0, 3.0, 4.0];
-        assert_eq!(statistics("sum", &values, None, None).unwrap()["result"], 10.0);
-        assert_eq!(statistics("median", &values, None, None).unwrap()["result"], 2.5);
+        assert_eq!(
+            statistics("sum", &values, None, None).unwrap()["result"],
+            10.0
+        );
+        assert_eq!(
+            statistics("median", &values, None, None).unwrap()["result"],
+            2.5
+        );
         assert_eq!(
             statistics("percentile", &values, None, Some(50.0)).unwrap()["result"],
             2.5

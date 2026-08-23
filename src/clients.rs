@@ -187,7 +187,13 @@ async fn decode_json(response: reqwest::Response, service: &str) -> Result<Value
 
 fn response_error_message(bytes: &[u8]) -> String {
     if let Ok(value) = serde_json::from_slice::<Value>(bytes) {
-        for pointer in ["/error", "/message", "/detail", "/data/error", "/data/message"] {
+        for pointer in [
+            "/error",
+            "/message",
+            "/detail",
+            "/data/error",
+            "/data/message",
+        ] {
             if let Some(message) = value.pointer(pointer).and_then(Value::as_str)
                 && !message.trim().is_empty()
             {

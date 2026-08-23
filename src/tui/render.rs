@@ -6,9 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 
-use super::app::{
-    ActivityItem, App, CredentialItem, FormKind, InvestigationPhase, Screen,
-};
+use super::app::{ActivityItem, App, CredentialItem, FormKind, InvestigationPhase, Screen};
 
 pub(super) fn draw(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
@@ -75,14 +73,12 @@ fn home(frame: &mut Frame, app: &App, area: Rect) {
     ];
 
     frame.render_widget(
-        Paragraph::new(body)
-            .alignment(Alignment::Left)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray))
-                    .title(" DEEP / READY "),
-            ),
+        Paragraph::new(body).alignment(Alignment::Left).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray))
+                .title(" DEEP / READY "),
+        ),
         centered(area, 82, 17),
     );
 }
@@ -257,7 +253,9 @@ fn running_header(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(format!("  {elapsed}"), Style::default().fg(Color::White)),
             Span::styled(
                 format!("   {}", app.phase.label()),
-                Style::default().fg(phase_color).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(phase_color)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("   idle {}s", app.idle_for().as_secs()),
@@ -346,14 +344,19 @@ fn activity_line(
     };
     let elapsed = format_duration(item.elapsed);
     let message_style = if latest {
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Gray)
     };
 
     Line::from(vec![
         Span::styled(format!("{elapsed} "), Style::default().fg(Color::DarkGray)),
-        Span::styled(format!("{marker} "), Style::default().fg(event_color(&item.kind))),
+        Span::styled(
+            format!("{marker} "),
+            Style::default().fg(event_color(&item.kind)),
+        ),
         Span::styled(
             format!("{:<11}", item.kind),
             Style::default().fg(event_color(&item.kind)),
@@ -465,7 +468,10 @@ fn sources(frame: &mut Frame, app: &App, area: Rect) {
                     source_color(class)
                 };
                 ListItem::new(Line::from(vec![
-                    Span::styled(format!("◆ S{id:<3} {class:<13}"), Style::default().fg(color)),
+                    Span::styled(
+                        format!("◆ S{id:<3} {class:<13}"),
+                        Style::default().fg(color),
+                    ),
                     Span::raw(fit(&format!("{title}{duplicate}"), message_width)),
                 ]))
             })
@@ -528,7 +534,9 @@ fn footer(frame: &mut Frame, app: &App, area: Rect) {
     let hints = match app.screen {
         Screen::Running => "q quit  ·  live state updates  ·  raw model reasoning is never shown",
         Screen::Report => "↑↓ scroll  ·  PgUp/PgDn  ·  n new case  ·  h home  ·  q quit",
-        Screen::Credentials => "↑↓ select  ·  Enter activate  ·  l add LLM  ·  f add Firecrawl  ·  h home",
+        Screen::Credentials => {
+            "↑↓ select  ·  Enter activate  ·  l add LLM  ·  f add Firecrawl  ·  h home"
+        }
         Screen::CredentialForm => "Tab next field  ·  Enter continue/save  ·  Esc cancel",
         Screen::Objective => "Enter start investigation  ·  Esc cancel",
         Screen::Home => "n new investigation  ·  c credentials  ·  q quit",
@@ -560,8 +568,7 @@ fn phase_rail(active: InvestigationPhase) -> Line<'static> {
         }
         let selected = active == *phase
             || (active == InvestigationPhase::Admission && *phase == InvestigationPhase::Discover)
-            || (active == InvestigationPhase::Complete
-                && *phase == InvestigationPhase::Synthesize);
+            || (active == InvestigationPhase::Complete && *phase == InvestigationPhase::Synthesize);
         spans.push(Span::styled(
             *label,
             if selected {
@@ -678,9 +685,9 @@ fn phase_color(phase: InvestigationPhase) -> Color {
         InvestigationPhase::Admission => Color::Yellow,
         InvestigationPhase::Discover | InvestigationPhase::Read => Color::Cyan,
         InvestigationPhase::Analyze => Color::Magenta,
-        InvestigationPhase::Verify | InvestigationPhase::Synthesize | InvestigationPhase::Complete => {
-            Color::Green
-        }
+        InvestigationPhase::Verify
+        | InvestigationPhase::Synthesize
+        | InvestigationPhase::Complete => Color::Green,
         InvestigationPhase::Failed => Color::Red,
     }
 }

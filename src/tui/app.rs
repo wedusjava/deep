@@ -181,11 +181,13 @@ impl App {
     }
 
     pub fn elapsed(&self) -> Duration {
-        self.started_at.map_or(Duration::ZERO, |started| started.elapsed())
+        self.started_at
+            .map_or(Duration::ZERO, |started| started.elapsed())
     }
 
     pub fn idle_for(&self) -> Duration {
-        self.last_event_at.map_or(Duration::ZERO, |last| last.elapsed())
+        self.last_event_at
+            .map_or(Duration::ZERO, |last| last.elapsed())
     }
 
     pub async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -510,8 +512,8 @@ fn phase_for_event(kind: &str, current: InvestigationPhase) -> InvestigationPhas
         "ADMISSION" => InvestigationPhase::Admission,
         "SEARCH" | "MAP" | "CRAWL" | "FOLLOW" | "FOUND" => InvestigationPhase::Discover,
         "SCRAPE" | "OPEN" | "INTERACT" | "DUPLICATE" => InvestigationPhase::Read,
-        "CLAIM" | "ENTITY" | "RELATIONSHIP" | "NOTE" | "CALCULATE" | "DATE_MATH"
-        | "STATISTICS" | "DIFF" => InvestigationPhase::Analyze,
+        "CLAIM" | "ENTITY" | "RELATIONSHIP" | "NOTE" | "CALCULATE" | "DATE_MATH" | "STATISTICS"
+        | "DIFF" => InvestigationPhase::Analyze,
         "EVIDENCE" | "LINK" | "VERIFY" => InvestigationPhase::Verify,
         "STOP" => InvestigationPhase::Synthesize,
         "ERROR" => InvestigationPhase::Failed,
@@ -562,7 +564,10 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_owned();
     }
-    let mut output = value.chars().take(max_chars.saturating_sub(1)).collect::<String>();
+    let mut output = value
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
     output.push('…');
     output
 }
