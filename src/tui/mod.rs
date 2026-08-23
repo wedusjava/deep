@@ -14,6 +14,8 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use crate::credentials::CredentialStore;
 use app::App;
 
+const FRAME_TIME: Duration = Duration::from_millis(80);
+
 pub async fn run(db_path: PathBuf, credentials: CredentialStore) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -34,10 +36,11 @@ async fn run_loop(
     mut app: App,
 ) -> Result<()> {
     while !app.should_quit {
+        app.tick();
         app.drain_agent_events();
         terminal.draw(|frame| render::draw(frame, &app))?;
 
-        if event::poll(Duration::from_millis(80))?
+        if event::poll(FRAME_TIME)?
             && let Event::Key(key) = event::read()?
             && key.kind != KeyEventKind::Release
         {
