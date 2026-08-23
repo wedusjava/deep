@@ -162,6 +162,10 @@ impl Store {
         }
 
         self.conn.execute(
+            "UPDATE sources SET source_class = ?2 WHERE id = ?1 AND source_class = 'unknown'",
+            params![source_id, source_class],
+        )?;
+        self.conn.execute(
             "INSERT INTO evidence (case_id, source_id, excerpt, source_class, directness, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![case_id, source_id, excerpt, source_class, directness, now()],
@@ -190,17 +194,28 @@ impl Store {
     ) -> Result<()> {
         validate_claim_status(status)?;
 
-        let evidence_count: i64 = self.conn.query_row(
-            "SELECT COUNT(*)
+        let (supports, contradicts): (i64, i64) = self.conn.query_row(
+            "SELECT
+                SUM(CASE WHEN ce.relation = 'SUPPORTS' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN ce.relation = 'CONTRADICTS' THEN 1 ELSE 0 END)
              FROM claim_evidence ce
              JOIN claims c ON c.id = ce.claim_id
              WHERE ce.claim_id = ?1 AND c.case_id = ?2",
             params![claim_id, case_id],
-            |row| row.get(0),
+            |row| Ok((row.get::<_, Option<i64>>(0)?.unwrap_or(0), row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
         )?;
 
-        if matches!(status, "VERIFIED" | "SUPPORTED" | "DISPROVEN") && evidence_count == 0 {
-            bail!("{status} requires at least one linked evidence record");
+        match status {
+            "VERIFIED" | "SUPPORTED" if supports == 0 => {
+                bail!("{status} requires at least one supporting evidence record")
+            }
+            "DISPROVEN" if contradicts == 0 => {
+                bail!("DISPROVEN requires at least one contradicting evidence record")
+            }
+            "CONFLICTING" if supports == 0 || contradicts == 0 => {
+                bail!("CONFLICTING requires both supporting and contradicting evidence")
+            }
+            _ => {}
         }
 
         let updated = self.conn.execute(
@@ -299,13 +314,30 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn verified_claim_requires_evidence() {
+    fn verified_claim_requires_supporting_evidence() {
         let dir = tempdir().unwrap();
         let store = Store::open(&dir.path().join("workspace.db")).unwrap();
         let case = store.create_case("test").unwrap();
         let claim = store.record_claim(&case, "A is B").unwrap();
 
         assert!(store.set_claim_status(&case, claim, "VERIFIED", "no evidence").is_err());
+    }
+
+    #[test]
+    fn conflicting_claim_requires_both_sides() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("workspace.db")).unwrap();
+        let case = store.create_case("test").unwrap();
+        let source = store
+            .upsert_source(&case, "https://a.test", None, "unknown", "source")
+            .unwrap();
+        let claim = store.record_claim(&case, "A is B").unwrap();
+        let evidence = store
+            .record_evidence(&case, source, "supports", "PRIMARY", "DIRECT")
+            .unwrap();
+        store.link_evidence(claim, evidence, "SUPPORTS").unwrap();
+
+        assert!(store.set_claim_status(&case, claim, "CONFLICTING", "one-sided").is_err());
     }
 
     #[test]
