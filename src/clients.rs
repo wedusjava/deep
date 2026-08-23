@@ -165,7 +165,10 @@ async fn decode_json(response: reqwest::Response, service: &str) -> Result<Value
 
     if !status.is_success() {
         let message = String::from_utf8_lossy(&bytes);
-        bail!("{service} returned HTTP {status}: {}", truncate(&message, 2_000));
+        bail!(
+            "{service} returned HTTP {status}: {}",
+            truncate(&message, 2_000)
+        );
     }
 
     serde_json::from_slice(&bytes)

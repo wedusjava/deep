@@ -175,7 +175,9 @@ impl App {
             KeyCode::Enter => {
                 if let Some(item) = items.get(self.credential_selection) {
                     match item {
-                        CredentialItem::Llm { name, .. } => self.credentials.set_active_llm(name)?,
+                        CredentialItem::Llm { name, .. } => {
+                            self.credentials.set_active_llm(name)?
+                        }
                         CredentialItem::Firecrawl { name, .. } => {
                             self.credentials.set_active_firecrawl(name)?
                         }
@@ -225,7 +227,10 @@ impl App {
     }
 
     fn save_form(&mut self) -> Result<()> {
-        let form = self.form.take().ok_or_else(|| anyhow!("missing credential form"))?;
+        let form = self
+            .form
+            .take()
+            .ok_or_else(|| anyhow!("missing credential form"))?;
         if form.values.iter().any(|value| value.trim().is_empty()) {
             self.error = Some("Every credential field is required.".into());
             self.form = Some(form);
@@ -336,14 +341,24 @@ impl App {
                     }
                     self.activity.push_back((kind, message));
                 }
-                ResearchEvent::Claim { id, statement, status } => {
+                ResearchEvent::Claim {
+                    id,
+                    statement,
+                    status,
+                } => {
                     if let Some(item) = self.claims.iter_mut().find(|item| item.0 == id) {
                         *item = (id, statement, status);
                     } else {
                         self.claims.push((id, statement, status));
                     }
                 }
-                ResearchEvent::Source { id, title, url, source_class, duplicate_of } => {
+                ResearchEvent::Source {
+                    id,
+                    title,
+                    url,
+                    source_class,
+                    duplicate_of,
+                } => {
                     let label = if title.trim().is_empty() { url } else { title };
                     if let Some(item) = self.sources.iter_mut().find(|item| item.0 == id) {
                         *item = (id, label, source_class, duplicate_of);

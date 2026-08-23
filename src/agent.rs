@@ -356,9 +356,7 @@ async fn execute_tool(
             let expression = required_str(args, "expression")?;
             let value = meval::eval_str(expression).context("invalid arithmetic expression")?;
             emit(workspace, tx, case_id, "CALCULATE", expression).await?;
-            Ok(ToolOutcome::Continue(
-                json!({"result": value}).to_string(),
-            ))
+            Ok(ToolOutcome::Continue(json!({"result": value}).to_string()))
         }
         "date_days_between" => {
             let start = NaiveDate::parse_from_str(required_str(args, "start")?, "%Y-%m-%d")?;
@@ -397,14 +395,11 @@ async fn execute_tool(
                 let store = workspace.lock().await;
                 let source_id = store
                     .source_id_by_url(case_id, source_url)?
-                    .ok_or_else(|| anyhow!("source must be scraped before evidence can be recorded"))?;
-                let id = store.record_evidence(
-                    case_id,
-                    source_id,
-                    excerpt,
-                    source_class,
-                    directness,
-                )?;
+                    .ok_or_else(|| {
+                        anyhow!("source must be scraped before evidence can be recorded")
+                    })?;
+                let id =
+                    store.record_evidence(case_id, source_id, excerpt, source_class, directness)?;
                 let source = store
                     .list_sources(case_id)?
                     .into_iter()
@@ -749,8 +744,7 @@ mod tests {
 
     #[test]
     fn parses_string_tool_arguments() {
-        let args =
-            parse_arguments(Some(&Value::String("{\"query\":\"x\"}".into()))).unwrap();
+        let args = parse_arguments(Some(&Value::String("{\"query\":\"x\"}".into()))).unwrap();
         assert_eq!(args["query"], "x");
     }
 }

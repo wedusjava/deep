@@ -13,7 +13,11 @@ use directories::ProjectDirs;
 use credentials::CredentialStore;
 
 #[derive(Parser)]
-#[command(name = "deep", version, about = "Evidence-first research agent harness")]
+#[command(
+    name = "deep",
+    version,
+    about = "Evidence-first research agent harness"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,

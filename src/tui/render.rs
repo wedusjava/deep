@@ -40,7 +40,9 @@ fn home(frame: &mut Frame, app: &App, area: Rect) {
     let body = vec![
         Line::from(Span::styled(
             "DEEP",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from("Evidence-first research agent harness"),
         Line::from(""),
@@ -81,12 +83,20 @@ fn credentials(frame: &mut Frame, app: &App, area: Rect) {
                     CredentialItem::Llm { name, active } => ("LLM", name, *active),
                     CredentialItem::Firecrawl { name, active } => ("FIRECRAWL", name, *active),
                 };
-                let cursor = if index == app.credential_selection { ">" } else { " " };
+                let cursor = if index == app.credential_selection {
+                    ">"
+                } else {
+                    " "
+                };
                 let marker = if active { "●" } else { "○" };
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!("{cursor} {marker} "),
-                        Style::default().fg(if active { Color::Green } else { Color::DarkGray }),
+                        Style::default().fg(if active {
+                            Color::Green
+                        } else {
+                            Color::DarkGray
+                        }),
                     ),
                     Span::styled(format!("{kind:<10}"), Style::default().fg(Color::Magenta)),
                     Span::raw(name.clone()),
@@ -119,10 +129,17 @@ fn credential_form(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 form.values[index].clone()
             };
-            let color = if index == form.field { Color::Cyan } else { Color::White };
+            let color = if index == form.field {
+                Color::Cyan
+            } else {
+                Color::White
+            };
             [
                 Line::from(Span::styled(*label, Style::default().fg(Color::DarkGray))),
-                Line::from(Span::styled(format!("> {value}"), Style::default().fg(color))),
+                Line::from(Span::styled(
+                    format!("> {value}"),
+                    Style::default().fg(color),
+                )),
             ]
         })
         .collect::<Vec<_>>();
@@ -164,7 +181,11 @@ fn running(frame: &mut Frame, app: &App, area: Rect) {
         .split(area);
     frame.render_widget(
         Paragraph::new(app.active_objective.as_str())
-            .block(Block::default().borders(Borders::ALL).title(" CASE / OBJECTIVE "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" CASE / OBJECTIVE "),
+            )
             .wrap(Wrap { trim: true }),
         vertical[0],
     );

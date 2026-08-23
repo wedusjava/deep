@@ -202,7 +202,12 @@ impl Store {
              JOIN claims c ON c.id = ce.claim_id
              WHERE ce.claim_id = ?1 AND c.case_id = ?2",
             params![claim_id, case_id],
-            |row| Ok((row.get::<_, Option<i64>>(0)?.unwrap_or(0), row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                    row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                ))
+            },
         )?;
 
         match status {
@@ -240,7 +245,8 @@ impl Store {
                 rationale: row.get(3)?,
             })
         })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub fn list_sources(&self, case_id: &str) -> Result<Vec<SourceRow>> {
@@ -256,7 +262,8 @@ impl Store {
                 duplicate_of: row.get(4)?,
             })
         })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub fn evidence_count_for_claim(&self, claim_id: i64) -> Result<i64> {
@@ -320,7 +327,11 @@ mod tests {
         let case = store.create_case("test").unwrap();
         let claim = store.record_claim(&case, "A is B").unwrap();
 
-        assert!(store.set_claim_status(&case, claim, "VERIFIED", "no evidence").is_err());
+        assert!(
+            store
+                .set_claim_status(&case, claim, "VERIFIED", "no evidence")
+                .is_err()
+        );
     }
 
     #[test]
@@ -337,7 +348,11 @@ mod tests {
             .unwrap();
         store.link_evidence(claim, evidence, "SUPPORTS").unwrap();
 
-        assert!(store.set_claim_status(&case, claim, "CONFLICTING", "one-sided").is_err());
+        assert!(
+            store
+                .set_claim_status(&case, claim, "CONFLICTING", "one-sided")
+                .is_err()
+        );
     }
 
     #[test]
