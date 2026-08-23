@@ -197,10 +197,15 @@ fn running(frame: &mut Frame, app: &App, area: Rect) {
     activity(frame, app, columns[0]);
     let right = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([
+            Constraint::Percentage(40),
+            Constraint::Percentage(25),
+            Constraint::Percentage(35),
+        ])
         .split(columns[1]);
     claims(frame, app, right[0]);
-    sources(frame, app, right[1]);
+    leads(frame, app, right[1]);
+    sources(frame, app, right[2]);
 }
 
 fn activity(frame: &mut Frame, app: &App, area: Rect) {
@@ -246,6 +251,26 @@ fn claims(frame: &mut Frame, app: &App, area: Rect) {
         .collect::<Vec<_>>();
     frame.render_widget(
         List::new(items).block(Block::default().borders(Borders::ALL).title(" CLAIMS ")),
+        area,
+    );
+}
+
+fn leads(frame: &mut Frame, app: &App, area: Rect) {
+    let items = app
+        .leads
+        .iter()
+        .map(|(id, description, status)| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("L{id:<3} {status:<10}"),
+                    Style::default().fg(lead_color(status)),
+                ),
+                Span::raw(description.clone()),
+            ]))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        List::new(items).block(Block::default().borders(Borders::ALL).title(" LEADS ")),
         area,
     );
 }
@@ -342,8 +367,9 @@ fn event_color(kind: &str) -> Color {
         "VERIFY" | "EVIDENCE" | "LINK" => Color::Green,
         "CLAIM" | "FOLLOW" | "FOUND" | "ADMISSION" => Color::Yellow,
         "ENTITY" | "RELATIONSHIP" => Color::Magenta,
-        "REJECT" | "TOOL_ERROR" | "ERROR" => Color::Red,
+        "REJECT" | "TOOL_ERROR" | "ERROR" | "DEAD_END" => Color::Red,
         "DUPLICATE" => Color::DarkGray,
+        "STATISTICS" | "DIFF" | "CALCULATE" | "DATE_MATH" | "NOTE" => Color::Blue,
         _ => Color::White,
     }
 }
@@ -353,6 +379,16 @@ fn status_color(status: &str) -> Color {
         "VERIFIED" => Color::Green,
         "SUPPORTED" | "UNRESOLVED" | "INSUFFICIENT_EVIDENCE" => Color::Yellow,
         "CONFLICTING" | "DISPROVEN" | "DEAD_END" => Color::Red,
+        _ => Color::White,
+    }
+}
+
+fn lead_color(status: &str) -> Color {
+    match status {
+        "ACTIVE" => Color::Cyan,
+        "OPEN" => Color::Yellow,
+        "EXHAUSTED" => Color::Red,
+        "DISCARDED" => Color::DarkGray,
         _ => Color::White,
     }
 }
