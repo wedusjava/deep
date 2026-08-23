@@ -88,6 +88,7 @@ pub(super) struct App {
     pub active_objective: String,
     pub activity: VecDeque<(String, String)>,
     pub claims: Vec<(i64, String, String)>,
+    pub leads: Vec<(i64, String, String)>,
     pub sources: Vec<(i64, String, String, Option<i64>)>,
     pub report: String,
     pub report_scroll: u16,
@@ -113,6 +114,7 @@ impl App {
             active_objective: String::new(),
             activity: VecDeque::new(),
             claims: Vec::new(),
+            leads: Vec::new(),
             sources: Vec::new(),
             report: String::new(),
             report_scroll: 0,
@@ -294,6 +296,7 @@ impl App {
         self.active_objective = objective;
         self.activity.clear();
         self.claims.clear();
+        self.leads.clear();
         self.sources.clear();
         self.report.clear();
         self.report_scroll = 0;
@@ -350,6 +353,17 @@ impl App {
                         *item = (id, statement, status);
                     } else {
                         self.claims.push((id, statement, status));
+                    }
+                }
+                ResearchEvent::Lead {
+                    id,
+                    description,
+                    status,
+                } => {
+                    if let Some(item) = self.leads.iter_mut().find(|item| item.0 == id) {
+                        *item = (id, description, status);
+                    } else {
+                        self.leads.push((id, description, status));
                     }
                 }
                 ResearchEvent::Source {
