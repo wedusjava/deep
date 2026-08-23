@@ -6,9 +6,10 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
 use crate::{
+    analysis_tools::{statistics, text_diff},
     clients::{FirecrawlClient, OpenAiClient},
     credentials::{FirecrawlProfile, LlmProfile},
-    store::{ClaimRow, SourceRow, Store},
+    store::{ClaimRow, LeadRow, SourceRow, Store},
 };
 
 const MAX_AGENT_STEPS: usize = 48;
@@ -27,25 +28,29 @@ Admission gate:
 Research rules:
 1. Search results are discovery only. A search snippet is not evidence. Scrape the underlying page before recording evidence from it.
 2. Prefer primary sources when they are appropriate to the claim. Source quality is claim-relative, not domain-relative.
-3. Keep claims, evidence, and hypotheses separate. Never silently promote a hypothesis into a fact.
+3. Keep claims, evidence, entities, relationships, leads, notes, and hypotheses conceptually separate. Never silently promote a hypothesis or note into a fact.
 4. Every material supported or verified claim must be linked to evidence using the workspace tools.
-5. Actively look for contradictory evidence and alternative explanations for material claims.
-6. Treat duplicate or derivative sources as non-independent corroboration.
-7. Use the minimum sufficient research. Stop when evidence is sufficient, genuinely conflicting, unavailable after reasonable search, a lead is exhausted, or new searches have diminishing returns.
-8. Never make the conclusion stronger than the evidence.
-9. It is valid to finish with insufficient evidence.
-10. Do not reveal hidden chain-of-thought. Tool actions and concise operational rationales are enough.
+5. Every material supported or verified relationship must also be linked to evidence.
+6. Actively look for contradictory evidence and alternative explanations for material claims and relationships.
+7. Treat duplicate or derivative sources as non-independent corroboration.
+8. Use the minimum sufficient research. Stop when evidence is sufficient, genuinely conflicting, unavailable after reasonable search, a lead is exhausted, or new searches have diminishing returns.
+9. Never make the conclusion stronger than the evidence.
+10. It is valid to finish with insufficient evidence.
+11. Use deterministic analysis tools for arithmetic, statistics, dates, and text comparison instead of estimating mentally.
+12. Do not reveal hidden chain-of-thought. Tool actions and concise operational rationales are enough.
 
 Workflow:
 - Discover candidate sources with search/map/crawl.
 - Read candidate sources with scrape before treating their content as evidence.
-- Record material claims.
+- Record material claims, entities, relationships, and leads in the workspace.
 - Record evidence excerpts only from scraped sources.
-- Link evidence to claims and update claim states.
-- Challenge important conclusions.
+- Link evidence to claims and relationships before promoting their epistemic state.
+- Challenge important conclusions and close or exhaust leads explicitly.
+- Use notes only for non-epistemic scratch information; a note is never evidence by itself.
 - Finish only through finish_report, or reject through reject_request.
 
-Claim states are: VERIFIED, SUPPORTED, UNRESOLVED, CONFLICTING, DISPROVEN, INSUFFICIENT_EVIDENCE, DEAD_END.
+Claim and relationship states are: VERIFIED, SUPPORTED, UNRESOLVED, CONFLICTING, DISPROVEN, INSUFFICIENT_EVIDENCE, DEAD_END.
+Lead states are: OPEN, ACTIVE, EXHAUSTED, DISCARDED.
 Source classes are: PRIMARY, HIGH_QUALITY_SECONDARY, SECONDARY, WEAK.
 Directness is DIRECT or INDIRECT.
 Evidence relations are SUPPORTS or CONTRADICTS.
@@ -61,6 +66,11 @@ pub enum ResearchEvent {
     Claim {
         id: i64,
         statement: String,
+        status: String,
+    },
+    Lead {
+        id: i64,
+        description: String,
         status: String,
     },
     Source {
@@ -372,6 +382,27 @@ async fn execute_tool(
             .await?;
             Ok(ToolOutcome::Continue(json!({"days": days}).to_string()))
         }
+        "statistics" => {
+            let operation = required_str(args, "operation")?;
+            let values = number_array(args, "values")?;
+            let other_values = optional_number_array(args, "other_values")?;
+            let percentile = args.get("p").and_then(Value::as_f64);
+            let result = statistics(
+                operation,
+                &values,
+                other_values.as_deref(),
+                percentile,
+            )?;
+            emit(workspace, tx, case_id, "STATISTICS", operation).await?;
+            Ok(ToolOutcome::Continue(result.to_string()))
+        }
+        "text_diff" => {
+            let left = required_str(args, "left")?;
+            let right = required_str(args, "right")?;
+            let diff = text_diff(left, right)?;
+            emit(workspace, tx, case_id, "DIFF", "Compared two text versions.").await?;
+            Ok(ToolOutcome::Continue(diff))
+        }
         "record_claim" => {
             let statement = required_str(args, "statement")?;
             let id = {
@@ -462,6 +493,133 @@ async fn execute_tool(
             });
             Ok(ToolOutcome::Continue("claim status updated".to_owned()))
         }
+        "record_entity" => {
+            let name = required_str(args, "name")?;
+            let kind = required_str(args, "kind")?;
+            let description = args.get("description").and_then(Value::as_str);
+            let id = {
+                let store = workspace.lock().await;
+                store.record_entity(case_id, name, kind, description)?
+            };
+            emit(
+                workspace,
+                tx,
+                case_id,
+                "ENTITY",
+                &format!("E{id} {name} ({kind})"),
+            )
+            .await?;
+            Ok(ToolOutcome::Continue(json!({"entity_id": id}).to_string()))
+        }
+        "record_relationship" => {
+            let from_entity_id = required_i64(args, "from_entity_id")?;
+            let to_entity_id = required_i64(args, "to_entity_id")?;
+            let relation = required_str(args, "relation")?;
+            let id = {
+                let store = workspace.lock().await;
+                store.record_relationship(case_id, from_entity_id, to_entity_id, relation)?
+            };
+            emit(
+                workspace,
+                tx,
+                case_id,
+                "RELATIONSHIP",
+                &format!("R{id} entity:{from_entity_id} -[{relation}]-> entity:{to_entity_id}"),
+            )
+            .await?;
+            Ok(ToolOutcome::Continue(
+                json!({"relationship_id": id}).to_string(),
+            ))
+        }
+        "link_relationship_evidence" => {
+            let relationship_id = required_i64(args, "relationship_id")?;
+            let evidence_id = required_i64(args, "evidence_id")?;
+            let relation = required_str(args, "relation")?;
+            {
+                let store = workspace.lock().await;
+                store.link_relationship_evidence(relationship_id, evidence_id, relation)?;
+            }
+            emit(
+                workspace,
+                tx,
+                case_id,
+                "LINK",
+                &format!("E{evidence_id} {relation} R{relationship_id}"),
+            )
+            .await?;
+            Ok(ToolOutcome::Continue("relationship evidence linked".to_owned()))
+        }
+        "set_relationship_status" => {
+            let relationship_id = required_i64(args, "relationship_id")?;
+            let status = required_str(args, "status")?;
+            let rationale = required_str(args, "rationale")?;
+            {
+                let store = workspace.lock().await;
+                store.set_relationship_status(case_id, relationship_id, status, rationale)?;
+            }
+            emit(
+                workspace,
+                tx,
+                case_id,
+                "VERIFY",
+                &format!("R{relationship_id} → {status}"),
+            )
+            .await?;
+            Ok(ToolOutcome::Continue(
+                "relationship status updated".to_owned(),
+            ))
+        }
+        "record_lead" => {
+            let description = required_str(args, "description")?;
+            let id = {
+                let store = workspace.lock().await;
+                store.record_lead(case_id, description)?
+            };
+            emit(workspace, tx, case_id, "FOLLOW", &format!("L{id} {description}")).await?;
+            let _ = tx.send(ResearchEvent::Lead {
+                id,
+                description: description.to_owned(),
+                status: "OPEN".to_owned(),
+            });
+            Ok(ToolOutcome::Continue(json!({"lead_id": id}).to_string()))
+        }
+        "set_lead_status" => {
+            let lead_id = required_i64(args, "lead_id")?;
+            let status = required_str(args, "status")?;
+            let rationale = required_str(args, "rationale")?;
+            let lead = {
+                let store = workspace.lock().await;
+                store.set_lead_status(case_id, lead_id, status, rationale)?;
+                find_lead(&store, case_id, lead_id)?
+            };
+            emit(
+                workspace,
+                tx,
+                case_id,
+                if status == "EXHAUSTED" {
+                    "DEAD_END"
+                } else {
+                    "FOLLOW"
+                },
+                &format!("L{lead_id} → {status}"),
+            )
+            .await?;
+            let _ = tx.send(ResearchEvent::Lead {
+                id: lead.id,
+                description: lead.description,
+                status: lead.status,
+            });
+            Ok(ToolOutcome::Continue("lead status updated".to_owned()))
+        }
+        "record_note" => {
+            let body = required_str(args, "body")?;
+            let id = {
+                let store = workspace.lock().await;
+                store.record_note(case_id, body)?
+            };
+            emit(workspace, tx, case_id, "NOTE", &format!("N{id} recorded")).await?;
+            Ok(ToolOutcome::Continue(json!({"note_id": id}).to_string()))
+        }
         "finish_report" => {
             if research_operations == 0 {
                 bail!(
@@ -511,6 +669,9 @@ fn build_report(
 ) -> Result<String> {
     let claims = store.list_claims(case_id)?;
     let sources = store.list_sources(case_id)?;
+    let entities = store.list_entities(case_id)?;
+    let relationships = store.list_relationships(case_id)?;
+    let leads = store.list_leads(case_id)?;
     let mut output = String::new();
     output.push_str("RESULT\n\n");
     output.push_str(conclusion.trim());
@@ -526,6 +687,53 @@ fn build_report(
                 claim.id, claim.status, count, claim.statement
             ));
             if let Some(rationale) = claim.rationale {
+                output.push_str(&format!("    rationale: {}\n", rationale.trim()));
+            }
+        }
+    }
+
+    output.push_str("\nENTITIES\n\n");
+    if entities.is_empty() {
+        output.push_str("No structured entities were recorded.\n");
+    } else {
+        for entity in entities {
+            output.push_str(&format!("E{}  {}  [{}]\n", entity.id, entity.name, entity.kind));
+            if let Some(description) = entity.description {
+                output.push_str(&format!("    {}\n", description.trim()));
+            }
+        }
+    }
+
+    output.push_str("\nRELATIONSHIPS\n\n");
+    if relationships.is_empty() {
+        output.push_str("No structured relationships were recorded.\n");
+    } else {
+        for relationship in relationships {
+            let count = store.evidence_count_for_relationship(relationship.id)?;
+            output.push_str(&format!(
+                "R{}  {}  [evidence: {}]\n    E{} {} -[{}]-> E{} {}\n",
+                relationship.id,
+                relationship.status,
+                count,
+                relationship.from_entity_id,
+                relationship.from_name,
+                relationship.relation,
+                relationship.to_entity_id,
+                relationship.to_name
+            ));
+            if let Some(rationale) = relationship.rationale {
+                output.push_str(&format!("    rationale: {}\n", rationale.trim()));
+            }
+        }
+    }
+
+    output.push_str("\nLEADS\n\n");
+    if leads.is_empty() {
+        output.push_str("No structured leads were recorded.\n");
+    } else {
+        for lead in leads {
+            output.push_str(&format!("L{}  {}\n    {}\n", lead.id, lead.status, lead.description));
+            if let Some(rationale) = lead.rationale {
                 output.push_str(&format!("    rationale: {}\n", rationale.trim()));
             }
         }
@@ -602,6 +810,16 @@ fn tool_specs() -> Vec<Value> {
             json!({"type":"object","properties":{"start":{"type":"string","description":"YYYY-MM-DD"},"end":{"type":"string","description":"YYYY-MM-DD"}},"required":["start","end"]}),
         ),
         tool(
+            "statistics",
+            "Run deterministic statistics. correlation requires other_values; percentile requires p; percentage_change requires exactly [old,new].",
+            json!({"type":"object","properties":{"operation":{"type":"string","enum":["sum","mean","median","min","max","percentage_change","standard_deviation","percentile","correlation"]},"values":{"type":"array","items":{"type":"number"},"minItems":1},"other_values":{"type":"array","items":{"type":"number"}},"p":{"type":"number","minimum":0,"maximum":100}},"required":["operation","values"]}),
+        ),
+        tool(
+            "text_diff",
+            "Compare two text versions line by line using deterministic diffing.",
+            json!({"type":"object","properties":{"left":{"type":"string"},"right":{"type":"string"}},"required":["left","right"]}),
+        ),
+        tool(
             "record_claim",
             "Create a material claim in the research workspace. New claims begin UNRESOLVED.",
             json!({"type":"object","properties":{"statement":{"type":"string"}},"required":["statement"]}),
@@ -620,6 +838,41 @@ fn tool_specs() -> Vec<Value> {
             "set_claim_status",
             "Update a claim's epistemic state. VERIFIED and SUPPORTED require supporting evidence; DISPROVEN requires contradicting evidence; CONFLICTING requires both.",
             json!({"type":"object","properties":{"claim_id":{"type":"integer"},"status":{"type":"string","enum":["VERIFIED","SUPPORTED","UNRESOLVED","CONFLICTING","DISPROVEN","INSUFFICIENT_EVIDENCE","DEAD_END"]},"rationale":{"type":"string"}},"required":["claim_id","status","rationale"]}),
+        ),
+        tool(
+            "record_entity",
+            "Create a structured entity discovered during the investigation.",
+            json!({"type":"object","properties":{"name":{"type":"string"},"kind":{"type":"string"},"description":{"type":"string"}},"required":["name","kind"]}),
+        ),
+        tool(
+            "record_relationship",
+            "Create an unresolved directed relationship between two existing entities.",
+            json!({"type":"object","properties":{"from_entity_id":{"type":"integer"},"to_entity_id":{"type":"integer"},"relation":{"type":"string"}},"required":["from_entity_id","to_entity_id","relation"]}),
+        ),
+        tool(
+            "link_relationship_evidence",
+            "Link evidence to a relationship before promoting its epistemic state.",
+            json!({"type":"object","properties":{"relationship_id":{"type":"integer"},"evidence_id":{"type":"integer"},"relation":{"type":"string","enum":["SUPPORTS","CONTRADICTS"]}},"required":["relationship_id","evidence_id","relation"]}),
+        ),
+        tool(
+            "set_relationship_status",
+            "Update a relationship's epistemic state using the same evidence constraints as claims.",
+            json!({"type":"object","properties":{"relationship_id":{"type":"integer"},"status":{"type":"string","enum":["VERIFIED","SUPPORTED","UNRESOLVED","CONFLICTING","DISPROVEN","INSUFFICIENT_EVIDENCE","DEAD_END"]},"rationale":{"type":"string"}},"required":["relationship_id","status","rationale"]}),
+        ),
+        tool(
+            "record_lead",
+            "Create a research lead that should be followed, exhausted, or discarded explicitly.",
+            json!({"type":"object","properties":{"description":{"type":"string"}},"required":["description"]}),
+        ),
+        tool(
+            "set_lead_status",
+            "Update a research lead state.",
+            json!({"type":"object","properties":{"lead_id":{"type":"integer"},"status":{"type":"string","enum":["OPEN","ACTIVE","EXHAUSTED","DISCARDED"]},"rationale":{"type":"string"}},"required":["lead_id","status","rationale"]}),
+        ),
+        tool(
+            "record_note",
+            "Store non-epistemic scratch information. Notes are not evidence and must not be cited as such.",
+            json!({"type":"object","properties":{"body":{"type":"string"}},"required":["body"]}),
         ),
         tool(
             "finish_report",
@@ -674,6 +927,28 @@ fn optional_u64(args: &Value, field: &str) -> Option<u64> {
     args.get(field).and_then(Value::as_u64)
 }
 
+fn number_array(args: &Value, field: &str) -> Result<Vec<f64>> {
+    let values = args
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing required number array field: {field}"))?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_f64()
+                .ok_or_else(|| anyhow!("{field} must contain only numbers"))
+        })
+        .collect()
+}
+
+fn optional_number_array(args: &Value, field: &str) -> Result<Option<Vec<f64>>> {
+    match args.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => number_array(args, field).map(Some),
+    }
+}
+
 fn extract_markdown(value: &Value) -> Option<&str> {
     value.pointer("/data/markdown").and_then(Value::as_str)
 }
@@ -698,6 +973,14 @@ fn find_claim(store: &Store, case_id: &str, claim_id: i64) -> Result<ClaimRow> {
         .into_iter()
         .find(|claim| claim.id == claim_id)
         .ok_or_else(|| anyhow!("claim C{claim_id} was not found"))
+}
+
+fn find_lead(store: &Store, case_id: &str, lead_id: i64) -> Result<LeadRow> {
+    store
+        .list_leads(case_id)?
+        .into_iter()
+        .find(|lead| lead.id == lead_id)
+        .ok_or_else(|| anyhow!("lead L{lead_id} was not found"))
 }
 
 fn source_event(source: &SourceRow) -> ResearchEvent {
@@ -746,5 +1029,11 @@ mod tests {
     fn parses_string_tool_arguments() {
         let args = parse_arguments(Some(&Value::String("{\"query\":\"x\"}".into()))).unwrap();
         assert_eq!(args["query"], "x");
+    }
+
+    #[test]
+    fn parses_numeric_arrays() {
+        let args = json!({"values": [1, 2.5, 3]});
+        assert_eq!(number_array(&args, "values").unwrap(), vec![1.0, 2.5, 3.0]);
     }
 }
