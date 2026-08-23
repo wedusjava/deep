@@ -6,7 +6,9 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 
-use super::app::{ActivityItem, App, CredentialItem, FormKind, InvestigationPhase, Screen};
+use super::app::{
+    ActivityItem, AgentStatus, App, CredentialItem, FormKind, InvestigationPhase, Screen,
+};
 
 pub(super) fn draw(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
@@ -49,7 +51,7 @@ fn home(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(format!("  {pulse}"), Style::default().fg(Color::DarkGray)),
         ]),
         Line::from(Span::styled(
-            "Evidence-first investigation console",
+            "Public-source OSINT agent swarm console",
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(""),
@@ -64,7 +66,7 @@ fn home(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(""),
         Line::from(vec![
             Span::styled("n", Style::default().fg(Color::Cyan)),
-            Span::raw(" new investigation    "),
+            Span::raw(" new OSINT case    "),
             Span::styled("c", Style::default().fg(Color::Cyan)),
             Span::raw(" credentials    "),
             Span::styled("q", Style::default().fg(Color::Cyan)),
@@ -77,7 +79,7 @@ fn home(frame: &mut Frame, app: &App, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::DarkGray))
-                .title(" DEEP / READY "),
+                .title(" DEEP / OSINT SWARM READY "),
         ),
         centered(area, 82, 17),
     );
@@ -177,13 +179,17 @@ fn credential_form(frame: &mut Frame, app: &App, area: Rect) {
 
 fn objective(frame: &mut Frame, app: &App, area: Rect) {
     let text = if app.objective.is_empty() {
-        "Type a substantive research objective..."
+        "Type a public-source OSINT objective..."
     } else {
         &app.objective
     };
     let body = vec![
         Line::from(Span::styled(
-            "What should Deep establish from evidence?",
+            "What should the OSINT swarm establish from public evidence?",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "Public sources only · no intrusion, access-control bypass, or non-public data collection",
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(""),
@@ -198,10 +204,10 @@ fn objective(frame: &mut Frame, app: &App, area: Rect) {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::DarkGray))
-                    .title(" NEW INVESTIGATION · Enter start · Esc cancel "),
+                    .title(" NEW OSINT CASE · Enter launch swarm · Esc cancel "),
             )
             .wrap(Wrap { trim: false }),
-        centered(area, 104, 12),
+        centered(area, 110, 13),
     );
 }
 
@@ -215,14 +221,14 @@ fn running(frame: &mut Frame, app: &App, area: Rect) {
     if vertical[1].width >= 96 {
         let columns = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(vertical[1]);
         activity(frame, app, columns[0]);
         state_stack(frame, app, columns[1]);
     } else {
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
             .split(vertical[1]);
         activity(frame, app, rows[0]);
         state_stack(frame, app, rows[1]);
@@ -240,12 +246,17 @@ fn running_header(frame: &mut Frame, app: &App, area: Rect) {
         .current_operation
         .as_ref()
         .map(|(kind, message)| (kind.as_str(), message.as_str()))
-        .unwrap_or(("WAIT", "Waiting for the investigator"));
+        .unwrap_or(("WAIT", "Waiting for swarm orchestration"));
 
+    let running_agents = app
+        .agents
+        .iter()
+        .filter(|agent| agent.status == AgentStatus::Running)
+        .count();
     let lines = vec![
         Line::from(vec![
             Span::styled(
-                format!("{spinner} INVESTIGATING"),
+                format!("{spinner} OSINT SWARM ACTIVE"),
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
@@ -258,7 +269,7 @@ fn running_header(frame: &mut Frame, app: &App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("   idle {}s", app.idle_for().as_secs()),
+                format!("   {running_agents} workers live   idle {}s", app.idle_for().as_secs()),
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
@@ -276,6 +287,8 @@ fn running_header(frame: &mut Frame, app: &App, area: Rect) {
         ]),
         phase_rail(app.phase),
         Line::from(vec![
+            metric("AGENTS", app.agents.len() as u64, Color::Magenta),
+            Span::raw("   "),
             metric("EVENTS", app.event_count, Color::Cyan),
             Span::raw("   "),
             metric("CLAIMS", app.claims.len() as u64, Color::Yellow),
@@ -301,7 +314,7 @@ fn running_header(frame: &mut Frame, app: &App, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::DarkGray))
-                .title(" DEEP / LIVE CASE "),
+                .title(" DEEP / LIVE OSINT SWARM "),
         ),
         area,
     );
@@ -325,7 +338,7 @@ fn activity(frame: &mut Frame, app: &App, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::DarkGray))
-                .title(format!(" LIVE TRACE · {} events ", app.event_count)),
+                .title(format!(" LIVE SWARM TRACE · {} events ", app.event_count)),
         ),
         area,
     );
@@ -369,14 +382,62 @@ fn state_stack(frame: &mut Frame, app: &App, area: Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(42),
             Constraint::Percentage(27),
-            Constraint::Percentage(31),
+            Constraint::Percentage(30),
+            Constraint::Percentage(19),
+            Constraint::Percentage(24),
         ])
         .split(area);
-    claims(frame, app, rows[0]);
-    leads(frame, app, rows[1]);
-    sources(frame, app, rows[2]);
+    agents(frame, app, rows[0]);
+    claims(frame, app, rows[1]);
+    leads(frame, app, rows[2]);
+    sources(frame, app, rows[3]);
+}
+
+fn agents(frame: &mut Frame, app: &App, area: Rect) {
+    let mission_width = area.width.saturating_sub(31) as usize;
+    let items = if app.agents.is_empty() {
+        vec![empty_item("Workers are starting")]
+    } else {
+        app.agents
+            .iter()
+            .map(|agent| {
+                let marker = if agent.status == AgentStatus::Running {
+                    spinner(app.animation_tick)
+                } else {
+                    agent_status_icon(agent.status)
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("{marker} {:<10}", agent.name),
+                        Style::default().fg(agent_status_color(agent.status)),
+                    ),
+                    Span::styled(
+                        format!("{:<9}", agent.status.label()),
+                        Style::default().fg(agent_status_color(agent.status)),
+                    ),
+                    Span::styled(
+                        format!("e{} x{} ", agent.events, agent.errors),
+                        Style::default().fg(if agent.errors == 0 {
+                            Color::DarkGray
+                        } else {
+                            Color::Red
+                        }),
+                    ),
+                    Span::raw(fit(&agent.mission, mission_width)),
+                ]))
+            })
+            .collect()
+    };
+    frame.render_widget(
+        List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray))
+                .title(format!(" AGENT SWARM · {} ", app.agents.len())),
+        ),
+        area,
+    );
 }
 
 fn claims(frame: &mut Frame, app: &App, area: Rect) {
@@ -495,7 +556,7 @@ fn report(frame: &mut Frame, app: &App, area: Rect) {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Green))
-                    .title(" RESULT / EVIDENCE REPORT "),
+                    .title(" OSINT SWARM / EVIDENCE REPORT "),
             )
             .wrap(Wrap { trim: false })
             .scroll((app.report_scroll, 0)),
@@ -528,18 +589,18 @@ fn footer(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().bg(Color::DarkGray).fg(Color::White),
             ),
             Span::styled(format!("  {heartbeat}  "), Style::default().fg(Color::Cyan)),
-            Span::raw("Evidence first. Conclusions second."),
+            Span::raw("Public-source OSINT · evidence first · uncertainty preserved."),
         ])
     };
     let hints = match app.screen {
-        Screen::Running => "q quit  ·  live state updates  ·  raw model reasoning is never shown",
+        Screen::Running => "q quit  ·  parallel worker state  ·  transient upstream errors retry automatically",
         Screen::Report => "↑↓ scroll  ·  PgUp/PgDn  ·  n new case  ·  h home  ·  q quit",
         Screen::Credentials => {
             "↑↓ select  ·  Enter activate  ·  l add LLM  ·  f add Firecrawl  ·  h home"
         }
         Screen::CredentialForm => "Tab next field  ·  Enter continue/save  ·  Esc cancel",
-        Screen::Objective => "Enter start investigation  ·  Esc cancel",
-        Screen::Home => "n new investigation  ·  c credentials  ·  q quit",
+        Screen::Objective => "Enter launch OSINT swarm  ·  Esc cancel",
+        Screen::Home => "n new OSINT case  ·  c credentials  ·  q quit",
     };
     frame.render_widget(
         Paragraph::new(vec![
@@ -651,6 +712,11 @@ fn fit(value: &str, max_chars: usize) -> String {
 
 fn event_icon(kind: &str) -> &'static str {
     match kind {
+        "SWARM_START" => "◎",
+        "AGENT_START" => "▶",
+        "AGENT_DONE" => "✓",
+        "AGENT_ERROR" => "!",
+        "SYNTHESIZE" => "Σ",
         "SEARCH" => "⌕",
         "FOUND" => "+",
         "SCRAPE" | "OPEN" => "↓",
@@ -669,6 +735,9 @@ fn event_icon(kind: &str) -> &'static str {
 
 fn event_color(kind: &str) -> Color {
     match kind {
+        "SWARM_START" | "AGENT_START" | "SYNTHESIZE" => Color::Magenta,
+        "AGENT_DONE" => Color::Green,
+        "AGENT_ERROR" => Color::Red,
         "SEARCH" | "SCRAPE" | "MAP" | "CRAWL" | "INTERACT" | "OPEN" => Color::Cyan,
         "VERIFY" | "EVIDENCE" | "LINK" | "STOP" => Color::Green,
         "CLAIM" | "FOLLOW" | "FOUND" | "ADMISSION" => Color::Yellow,
@@ -689,6 +758,22 @@ fn phase_color(phase: InvestigationPhase) -> Color {
         | InvestigationPhase::Synthesize
         | InvestigationPhase::Complete => Color::Green,
         InvestigationPhase::Failed => Color::Red,
+    }
+}
+
+fn agent_status_color(status: AgentStatus) -> Color {
+    match status {
+        AgentStatus::Running => Color::Cyan,
+        AgentStatus::Complete => Color::Green,
+        AgentStatus::Error => Color::Red,
+    }
+}
+
+fn agent_status_icon(status: AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Running => "●",
+        AgentStatus::Complete => "✓",
+        AgentStatus::Error => "!",
     }
 }
 
