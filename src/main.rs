@@ -3,6 +3,7 @@ mod analysis_tools;
 mod clients;
 mod credentials;
 mod store;
+mod swarm;
 mod tui;
 
 use std::path::PathBuf;
@@ -17,7 +18,7 @@ use credentials::CredentialStore;
 #[command(
     name = "deep",
     version,
-    about = "Evidence-first research agent harness"
+    about = "Public-source OSINT swarm investigation harness"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -26,7 +27,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Launch the investigation console.
+    /// Launch the OSINT swarm console.
     Tui,
     /// Print local application paths without exposing credential contents.
     Paths,
