@@ -16,9 +16,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Format
-        run: cargo fmt --all -- --check
-        continue-on-error: true
+      - name: Apply rustfmt
+        run: cargo fmt --all
+      - name: Upload formatted source
+        uses: actions/upload-artifact@v4
+        with:
+          name: formatted-source
+          path: src
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Test
