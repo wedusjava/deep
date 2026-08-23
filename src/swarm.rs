@@ -1,4 +1,7 @@
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Result, anyhow};
 use tokio::{
@@ -171,7 +174,9 @@ async fn run(
         .filter(|result| result.report.is_some())
         .count();
     if successful == 0 {
-        return Err(anyhow!("all specialist workers failed before producing a report"));
+        return Err(anyhow!(
+            "all specialist workers failed before producing a report"
+        ));
     }
 
     let _ = tx.send(ResearchEvent::Activity {
