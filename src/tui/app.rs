@@ -1,4 +1,8 @@
-use std::{collections::VecDeque, path::PathBuf};
+use std::{
+    collections::VecDeque,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Result, anyhow};
 use crossterm::event::{KeyCode, KeyEvent};
@@ -10,6 +14,7 @@ use crate::{
 };
 
 const MAX_ACTIVITY: usize = 500;
+const MAX_UI_MESSAGE_CHARS: usize = 220;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Screen {
@@ -19,6 +24,40 @@ pub(super) enum Screen {
     Objective,
     Running,
     Report,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum InvestigationPhase {
+    Admission,
+    Discover,
+    Read,
+    Analyze,
+    Verify,
+    Synthesize,
+    Complete,
+    Failed,
+}
+
+impl InvestigationPhase {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Admission => "ADMISSION",
+            Self::Discover => "DISCOVER",
+            Self::Read => "READ",
+            Self::Analyze => "ANALYZE",
+            Self::Verify => "VERIFY",
+            Self::Synthesize => "SYNTHESIZE",
+            Self::Complete => "COMPLETE",
+            Self::Failed => "FAILED",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct ActivityItem {
+    pub kind: String,
+    pub message: String,
+    pub elapsed: Duration,
 }
 
 #[derive(Clone, Copy)]
@@ -86,7 +125,7 @@ pub(super) struct App {
     pub form: Option<CredentialForm>,
     pub objective: String,
     pub active_objective: String,
-    pub activity: VecDeque<(String, String)>,
+    pub activity: VecDeque<ActivityItem>,
     pub claims: Vec<(i64, String, String)>,
     pub leads: Vec<(i64, String, String)>,
     pub sources: Vec<(i64, String, String, Option<i64>)>,
@@ -94,6 +133,13 @@ pub(super) struct App {
     pub report_scroll: u16,
     pub receiver: Option<UnboundedReceiver<ResearchEvent>>,
     pub error: Option<String>,
+    pub phase: InvestigationPhase,
+    pub animation_tick: u64,
+    pub event_count: u64,
+    pub tool_error_count: u64,
+    pub current_operation: Option<(String, String)>,
+    started_at: Option<Instant>,
+    last_event_at: Option<Instant>,
 }
 
 impl App {
@@ -120,7 +166,26 @@ impl App {
             report_scroll: 0,
             receiver: None,
             error: None,
+            phase: InvestigationPhase::Admission,
+            animation_tick: 0,
+            event_count: 0,
+            tool_error_count: 0,
+            current_operation: None,
+            started_at: None,
+            last_event_at: None,
         }
+    }
+
+    pub fn tick(&mut self) {
+        self.animation_tick = self.animation_tick.wrapping_add(1);
+    }
+
+    pub fn elapsed(&self) -> Duration {
+        self.started_at.map_or(Duration::ZERO, |started| started.elapsed())
+    }
+
+    pub fn idle_for(&self) -> Duration {
+        self.last_event_at.map_or(Duration::ZERO, |last| last.elapsed())
     }
 
     pub async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -293,6 +358,7 @@ impl App {
             tx,
         ));
 
+        let now = Instant::now();
         self.active_objective = objective;
         self.activity.clear();
         self.claims.clear();
@@ -302,6 +368,12 @@ impl App {
         self.report_scroll = 0;
         self.receiver = Some(rx);
         self.error = None;
+        self.phase = InvestigationPhase::Admission;
+        self.event_count = 0;
+        self.tool_error_count = 0;
+        self.current_operation = None;
+        self.started_at = Some(now);
+        self.last_event_at = Some(now);
         self.screen = Screen::Running;
         Ok(())
     }
@@ -339,10 +411,23 @@ impl App {
         for event in pending {
             match event {
                 ResearchEvent::Activity { kind, message } => {
+                    let elapsed = self.elapsed();
+                    self.event_count = self.event_count.saturating_add(1);
+                    if matches!(kind.as_str(), "TOOL_ERROR" | "ERROR") {
+                        self.tool_error_count = self.tool_error_count.saturating_add(1);
+                    }
+                    self.phase = phase_for_event(&kind, self.phase);
+                    let message = compact_activity_message(&kind, &message);
+                    self.current_operation = Some((kind.clone(), message.clone()));
+                    self.last_event_at = Some(Instant::now());
                     if self.activity.len() == MAX_ACTIVITY {
                         self.activity.pop_front();
                     }
-                    self.activity.push_back((kind, message));
+                    self.activity.push_back(ActivityItem {
+                        kind,
+                        message,
+                        elapsed,
+                    });
                 }
                 ResearchEvent::Claim {
                     id,
@@ -381,13 +466,22 @@ impl App {
                     }
                 }
                 ResearchEvent::Finished { case_id, report } => {
+                    self.phase = InvestigationPhase::Complete;
+                    self.current_operation = None;
                     self.report = format!("CASE {case_id}\n\n{report}");
                     self.receiver = None;
                     self.screen = Screen::Report;
                 }
                 ResearchEvent::Failed { message } => {
-                    self.error = Some(message.clone());
-                    self.activity.push_back(("ERROR".into(), message));
+                    self.phase = InvestigationPhase::Failed;
+                    self.tool_error_count = self.tool_error_count.saturating_add(1);
+                    let compact = compact_activity_message("ERROR", &message);
+                    self.error = Some(compact.clone());
+                    self.activity.push_back(ActivityItem {
+                        kind: "ERROR".into(),
+                        message: compact,
+                        elapsed: self.elapsed(),
+                    });
                 }
             }
         }
@@ -409,4 +503,66 @@ impl App {
         }
         items
     }
+}
+
+fn phase_for_event(kind: &str, current: InvestigationPhase) -> InvestigationPhase {
+    match kind {
+        "ADMISSION" => InvestigationPhase::Admission,
+        "SEARCH" | "MAP" | "CRAWL" | "FOLLOW" | "FOUND" => InvestigationPhase::Discover,
+        "SCRAPE" | "OPEN" | "INTERACT" | "DUPLICATE" => InvestigationPhase::Read,
+        "CLAIM" | "ENTITY" | "RELATIONSHIP" | "NOTE" | "CALCULATE" | "DATE_MATH"
+        | "STATISTICS" | "DIFF" => InvestigationPhase::Analyze,
+        "EVIDENCE" | "LINK" | "VERIFY" => InvestigationPhase::Verify,
+        "STOP" => InvestigationPhase::Synthesize,
+        "ERROR" => InvestigationPhase::Failed,
+        _ => current,
+    }
+}
+
+fn compact_activity_message(kind: &str, message: &str) -> String {
+    let normalized = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    let compact = if kind == "TOOL_ERROR" {
+        compact_tool_error(&normalized)
+    } else {
+        match normalized.as_str() {
+            "Evaluating whether the objective requires substantive research." => {
+                "Checking whether this objective requires evidence-based research".to_owned()
+            }
+            "Search results received; snippets remain discovery-only." => {
+                "Results received · snippets remain discovery-only".to_owned()
+            }
+            other => other.to_owned(),
+        }
+    };
+    truncate_chars(&compact, MAX_UI_MESSAGE_CHARS)
+}
+
+fn compact_tool_error(message: &str) -> String {
+    let tool = message.split(':').next().unwrap_or("tool").trim();
+    if let Some(index) = message.find("returned HTTP") {
+        let status = message[index + "returned ".len()..]
+            .split(':')
+            .next()
+            .unwrap_or("HTTP error")
+            .trim();
+        return format!("{tool} · {status} · pivoting to another source");
+    }
+    if let Some(index) = message.find("HTTP ") {
+        let status = message[index..]
+            .split(['{', '['])
+            .next()
+            .unwrap_or("HTTP error")
+            .trim_matches(|character: char| character == ':' || character.is_whitespace());
+        return format!("{tool} · {status}");
+    }
+    truncate_chars(message, 150)
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+    let mut output = value.chars().take(max_chars.saturating_sub(1)).collect::<String>();
+    output.push('…');
+    output
 }
