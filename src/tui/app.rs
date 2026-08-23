@@ -9,8 +9,9 @@ use crossterm::event::{KeyCode, KeyEvent};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use crate::{
-    agent::{ResearchEvent, run_investigation},
+    agent::ResearchEvent,
     credentials::{CredentialStore, FirecrawlProfile, LlmProfile},
+    swarm::run_swarm_investigation,
 };
 
 const MAX_ACTIVITY: usize = 500;
@@ -58,6 +59,32 @@ pub(super) struct ActivityItem {
     pub kind: String,
     pub message: String,
     pub elapsed: Duration,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum AgentStatus {
+    Running,
+    Complete,
+    Error,
+}
+
+impl AgentStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Running => "RUNNING",
+            Self::Complete => "DONE",
+            Self::Error => "DEGRADED",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct AgentItem {
+    pub name: String,
+    pub mission: String,
+    pub status: AgentStatus,
+    pub events: u64,
+    pub errors: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -126,6 +153,7 @@ pub(super) struct App {
     pub objective: String,
     pub active_objective: String,
     pub activity: VecDeque<ActivityItem>,
+    pub agents: Vec<AgentItem>,
     pub claims: Vec<(i64, String, String)>,
     pub leads: Vec<(i64, String, String)>,
     pub sources: Vec<(i64, String, String, Option<i64>)>,
@@ -159,6 +187,7 @@ impl App {
             objective: String::new(),
             active_objective: String::new(),
             activity: VecDeque::new(),
+            agents: Vec::new(),
             claims: Vec::new(),
             leads: Vec::new(),
             sources: Vec::new(),
@@ -352,7 +381,7 @@ impl App {
         let db_path = self.db_path.clone();
         let (tx, rx) = mpsc::unbounded_channel();
 
-        tokio::spawn(run_investigation(
+        tokio::spawn(run_swarm_investigation(
             objective.clone(),
             llm,
             firecrawl,
@@ -363,6 +392,7 @@ impl App {
         let now = Instant::now();
         self.active_objective = objective;
         self.activity.clear();
+        self.agents.clear();
         self.claims.clear();
         self.leads.clear();
         self.sources.clear();
@@ -415,7 +445,8 @@ impl App {
                 ResearchEvent::Activity { kind, message } => {
                     let elapsed = self.elapsed();
                     self.event_count = self.event_count.saturating_add(1);
-                    if matches!(kind.as_str(), "TOOL_ERROR" | "ERROR") {
+                    self.update_agent_state(&kind, &message);
+                    if matches!(kind.as_str(), "TOOL_ERROR" | "ERROR" | "AGENT_ERROR") {
                         self.tool_error_count = self.tool_error_count.saturating_add(1);
                     }
                     self.phase = phase_for_event(&kind, self.phase);
@@ -470,6 +501,11 @@ impl App {
                 ResearchEvent::Finished { case_id, report } => {
                     self.phase = InvestigationPhase::Complete;
                     self.current_operation = None;
+                    for agent in &mut self.agents {
+                        if agent.status == AgentStatus::Running {
+                            agent.status = AgentStatus::Complete;
+                        }
+                    }
                     self.report = format!("CASE {case_id}\n\n{report}");
                     self.receiver = None;
                     self.screen = Screen::Report;
@@ -477,6 +513,11 @@ impl App {
                 ResearchEvent::Failed { message } => {
                     self.phase = InvestigationPhase::Failed;
                     self.tool_error_count = self.tool_error_count.saturating_add(1);
+                    for agent in &mut self.agents {
+                        if agent.status == AgentStatus::Running {
+                            agent.status = AgentStatus::Error;
+                        }
+                    }
                     let compact = compact_activity_message("ERROR", &message);
                     self.error = Some(compact.clone());
                     self.activity.push_back(ActivityItem {
@@ -485,6 +526,45 @@ impl App {
                         elapsed: self.elapsed(),
                     });
                 }
+            }
+        }
+    }
+
+    fn update_agent_state(&mut self, kind: &str, message: &str) {
+        if matches!(kind, "AGENT_START" | "AGENT_DONE" | "AGENT_ERROR") {
+            let (name, detail) = message.split_once('|').unwrap_or((message, ""));
+            let status = match kind {
+                "AGENT_DONE" => AgentStatus::Complete,
+                "AGENT_ERROR" => AgentStatus::Error,
+                _ => AgentStatus::Running,
+            };
+            if let Some(agent) = self.agents.iter_mut().find(|agent| agent.name == name) {
+                agent.status = status;
+                if kind == "AGENT_ERROR" {
+                    agent.errors = agent.errors.saturating_add(1);
+                }
+                if !detail.trim().is_empty() && kind == "AGENT_START" {
+                    agent.mission = detail.trim().to_owned();
+                }
+            } else {
+                self.agents.push(AgentItem {
+                    name: name.trim().to_owned(),
+                    mission: detail.trim().to_owned(),
+                    status,
+                    events: 0,
+                    errors: u64::from(kind == "AGENT_ERROR"),
+                });
+            }
+            return;
+        }
+
+        let Some(name) = agent_name_from_message(message) else {
+            return;
+        };
+        if let Some(agent) = self.agents.iter_mut().find(|agent| agent.name == name) {
+            agent.events = agent.events.saturating_add(1);
+            if kind == "TOOL_ERROR" {
+                agent.errors = agent.errors.saturating_add(1);
             }
         }
     }
@@ -509,13 +589,13 @@ impl App {
 
 fn phase_for_event(kind: &str, current: InvestigationPhase) -> InvestigationPhase {
     match kind {
-        "ADMISSION" => InvestigationPhase::Admission,
+        "SWARM_START" | "AGENT_START" | "ADMISSION" => InvestigationPhase::Admission,
         "SEARCH" | "MAP" | "CRAWL" | "FOLLOW" | "FOUND" => InvestigationPhase::Discover,
         "SCRAPE" | "OPEN" | "INTERACT" | "DUPLICATE" => InvestigationPhase::Read,
         "CLAIM" | "ENTITY" | "RELATIONSHIP" | "NOTE" | "CALCULATE" | "DATE_MATH" | "STATISTICS"
         | "DIFF" => InvestigationPhase::Analyze,
         "EVIDENCE" | "LINK" | "VERIFY" => InvestigationPhase::Verify,
-        "STOP" => InvestigationPhase::Synthesize,
+        "SYNTHESIZE" | "STOP" => InvestigationPhase::Synthesize,
         "ERROR" => InvestigationPhase::Failed,
         _ => current,
     }
@@ -540,24 +620,41 @@ fn compact_activity_message(kind: &str, message: &str) -> String {
 }
 
 fn compact_tool_error(message: &str) -> String {
-    let tool = message.split(':').next().unwrap_or("tool").trim();
-    if let Some(index) = message.find("returned HTTP") {
-        let status = message[index + "returned ".len()..]
+    let agent_prefix = if message.starts_with('[') {
+        message.find(']').map(|end| &message[..=end])
+    } else {
+        None
+    };
+    let tool_message = agent_prefix
+        .and_then(|prefix| message.strip_prefix(prefix))
+        .map(str::trim)
+        .unwrap_or(message);
+    let tool = tool_message.split(':').next().unwrap_or("tool").trim();
+    let prefix = agent_prefix.map(|value| format!("{value} ")).unwrap_or_default();
+    if let Some(index) = tool_message.find("returned HTTP") {
+        let status = tool_message[index + "returned ".len()..]
             .split(':')
             .next()
             .unwrap_or("HTTP error")
             .trim();
-        return format!("{tool} · {status} · pivoting to another source");
+        return format!("{prefix}{tool} · {status} · retrying or pivoting");
     }
-    if let Some(index) = message.find("HTTP ") {
-        let status = message[index..]
+    if let Some(index) = tool_message.find("HTTP ") {
+        let status = tool_message[index..]
             .split(['{', '['])
             .next()
             .unwrap_or("HTTP error")
             .trim_matches(|character: char| character == ':' || character.is_whitespace());
-        return format!("{tool} · {status}");
+        return format!("{prefix}{tool} · {status}");
     }
     truncate_chars(message, 150)
+}
+
+fn agent_name_from_message(message: &str) -> Option<&str> {
+    let rest = message.strip_prefix('[')?;
+    let end = rest.find(']')?;
+    let name = &rest[..end];
+    (!name.trim().is_empty()).then_some(name.trim())
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {
