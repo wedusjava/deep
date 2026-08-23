@@ -1,9 +1,9 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::NaiveDate;
 use serde_json::{Value, json};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
 use crate::{
     clients::{FirecrawlClient, OpenAiClient},
@@ -13,6 +13,8 @@ use crate::{
 
 const MAX_AGENT_STEPS: usize = 48;
 const MAX_TOOL_OUTPUT_CHARS: usize = 40_000;
+
+type Workspace = Arc<Mutex<Store>>;
 
 const SYSTEM_PROMPT: &str = r#"You are the investigator inside Deep, an evidence-first research harness.
 
@@ -52,7 +54,10 @@ Write the human-facing conclusion and limitations in the user's language unless 
 
 #[derive(Clone, Debug)]
 pub enum ResearchEvent {
-    Activity { kind: String, message: String },
+    Activity {
+        kind: String,
+        message: String,
+    },
     Claim {
         id: i64,
         statement: String,
@@ -65,8 +70,13 @@ pub enum ResearchEvent {
         source_class: String,
         duplicate_of: Option<i64>,
     },
-    Finished { case_id: String, report: String },
-    Failed { message: String },
+    Finished {
+        case_id: String,
+        report: String,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 pub async fn run_investigation(
@@ -98,18 +108,22 @@ async fn run(
     db_path: PathBuf,
     tx: UnboundedSender<ResearchEvent>,
 ) -> Result<()> {
-    let store = Store::open(&db_path)?;
-    let case_id = store.create_case(&objective)?;
+    let workspace = Arc::new(Mutex::new(Store::open(&db_path)?));
+    let case_id = {
+        let store = workspace.lock().await;
+        store.create_case(&objective)?
+    };
     let llm = OpenAiClient::new(llm_profile)?;
     let firecrawl = FirecrawlClient::new(firecrawl_profile)?;
 
     emit(
-        &store,
+        &workspace,
         &tx,
         &case_id,
         "ADMISSION",
         "Evaluating whether the objective requires substantive research.",
-    )?;
+    )
+    .await?;
 
     let mut messages = vec![
         json!({"role": "system", "content": SYSTEM_PROMPT}),
@@ -170,7 +184,7 @@ async fn run(
             let outcome = execute_tool(
                 name,
                 &arguments,
-                &store,
+                &workspace,
                 &firecrawl,
                 &case_id,
                 &tx,
@@ -195,12 +209,13 @@ async fn run(
                 }
                 Err(error) => {
                     emit(
-                        &store,
+                        &workspace,
                         &tx,
                         &case_id,
                         "TOOL_ERROR",
                         &format!("{name}: {error:#}"),
-                    )?;
+                    )
+                    .await?;
                     messages.push(json!({
                         "role": "tool",
                         "tool_call_id": id,
@@ -212,22 +227,26 @@ async fn run(
 
         if step + 1 == MAX_AGENT_STEPS {
             emit(
-                &store,
+                &workspace,
                 &tx,
                 &case_id,
                 "STOP",
                 "Operational step guardrail reached before an epistemic stop condition.",
-            )?;
+            )
+            .await?;
         }
     }
 
-    store.finish_case(&case_id, "guardrail")?;
-    let report = build_report(
-        &store,
-        &case_id,
-        "The investigation stopped at the operational step guardrail before a defensible conclusion was produced.",
-        "This is an operational stop, not evidence that the objective is unanswerable.",
-    )?;
+    let report = {
+        let store = workspace.lock().await;
+        store.finish_case(&case_id, "guardrail")?;
+        build_report(
+            &store,
+            &case_id,
+            "The investigation stopped at the operational step guardrail before a defensible conclusion was produced.",
+            "This is an operational stop, not evidence that the objective is unanswerable.",
+        )?
+    };
     let _ = tx.send(ResearchEvent::Finished { case_id, report });
     Ok(())
 }
@@ -240,7 +259,7 @@ enum ToolOutcome {
 async fn execute_tool(
     name: &str,
     args: &Value,
-    store: &Store,
+    workspace: &Workspace,
     firecrawl: &FirecrawlClient,
     case_id: &str,
     tx: &UnboundedSender<ResearchEvent>,
@@ -250,32 +269,49 @@ async fn execute_tool(
         "search" => {
             let query = required_str(args, "query")?;
             let limit = optional_u64(args, "limit").unwrap_or(8) as usize;
-            emit(store, tx, case_id, "SEARCH", query)?;
+            emit(workspace, tx, case_id, "SEARCH", query).await?;
             let value = firecrawl.search(query, limit).await?;
-            emit(store, tx, case_id, "FOUND", "Search results received; snippets remain discovery-only.")?;
+            emit(
+                workspace,
+                tx,
+                case_id,
+                "FOUND",
+                "Search results received; snippets remain discovery-only.",
+            )
+            .await?;
             Ok(ToolOutcome::Continue(value.to_string()))
         }
         "scrape" => {
             let url = required_str(args, "url")?;
-            emit(store, tx, case_id, "SCRAPE", url)?;
+            emit(workspace, tx, case_id, "SCRAPE", url).await?;
             let value = firecrawl.scrape(url).await?;
             let markdown = extract_markdown(&value)
                 .ok_or_else(|| anyhow!("Firecrawl scrape response did not contain markdown"))?;
             let title = extract_title(&value);
-            let source_id = store.upsert_source(case_id, url, title.as_deref(), "unknown", markdown)?;
-            let source = store
-                .list_sources(case_id)?
-                .into_iter()
-                .find(|source| source.id == source_id)
-                .ok_or_else(|| anyhow!("source was not persisted"))?;
+            let (source_id, source) = {
+                let store = workspace.lock().await;
+                let source_id =
+                    store.upsert_source(case_id, url, title.as_deref(), "unknown", markdown)?;
+                let source = store
+                    .list_sources(case_id)?
+                    .into_iter()
+                    .find(|source| source.id == source_id)
+                    .ok_or_else(|| anyhow!("source was not persisted"))?;
+                (source_id, source)
+            };
             let _ = tx.send(source_event(&source));
             emit(
-                store,
+                workspace,
                 tx,
                 case_id,
-                if source.duplicate_of.is_some() { "DUPLICATE" } else { "OPEN" },
+                if source.duplicate_of.is_some() {
+                    "DUPLICATE"
+                } else {
+                    "OPEN"
+                },
                 &format!("S{source_id} {url}"),
-            )?;
+            )
+            .await?;
             Ok(ToolOutcome::Continue(
                 json!({
                     "source_id": source_id,
@@ -291,7 +327,7 @@ async fn execute_tool(
             let url = required_str(args, "url")?;
             let search = args.get("search").and_then(Value::as_str);
             let limit = optional_u64(args, "limit").unwrap_or(200) as usize;
-            emit(store, tx, case_id, "MAP", url)?;
+            emit(workspace, tx, case_id, "MAP", url).await?;
             let value = firecrawl.map(url, search, limit).await?;
             Ok(ToolOutcome::Continue(value.to_string()))
         }
@@ -299,40 +335,52 @@ async fn execute_tool(
             let url = required_str(args, "url")?;
             let limit = optional_u64(args, "limit").unwrap_or(50) as usize;
             let max_depth = optional_u64(args, "max_depth").unwrap_or(2) as usize;
-            emit(store, tx, case_id, "CRAWL", url)?;
+            emit(workspace, tx, case_id, "CRAWL", url).await?;
             let value = firecrawl.crawl(url, limit, max_depth).await?;
             Ok(ToolOutcome::Continue(value.to_string()))
         }
         "crawl_status" => {
             let id = required_str(args, "id")?;
-            emit(store, tx, case_id, "FOLLOW", &format!("crawl {id}"))?;
+            emit(workspace, tx, case_id, "FOLLOW", &format!("crawl {id}")).await?;
             let value = firecrawl.crawl_status(id).await?;
             Ok(ToolOutcome::Continue(value.to_string()))
         }
         "interact" => {
             let scrape_id = required_str(args, "scrape_id")?;
             let prompt = required_str(args, "prompt")?;
-            emit(store, tx, case_id, "INTERACT", prompt)?;
+            emit(workspace, tx, case_id, "INTERACT", prompt).await?;
             let value = firecrawl.interact(scrape_id, prompt).await?;
             Ok(ToolOutcome::Continue(value.to_string()))
         }
         "calculator" => {
             let expression = required_str(args, "expression")?;
             let value = meval::eval_str(expression).context("invalid arithmetic expression")?;
-            emit(store, tx, case_id, "CALCULATE", expression)?;
-            Ok(ToolOutcome::Continue(json!({"result": value}).to_string()))
+            emit(workspace, tx, case_id, "CALCULATE", expression).await?;
+            Ok(ToolOutcome::Continue(
+                json!({"result": value}).to_string(),
+            ))
         }
         "date_days_between" => {
             let start = NaiveDate::parse_from_str(required_str(args, "start")?, "%Y-%m-%d")?;
             let end = NaiveDate::parse_from_str(required_str(args, "end")?, "%Y-%m-%d")?;
             let days = end.signed_duration_since(start).num_days();
-            emit(store, tx, case_id, "DATE_MATH", &format!("{start} → {end}"))?;
+            emit(
+                workspace,
+                tx,
+                case_id,
+                "DATE_MATH",
+                &format!("{start} → {end}"),
+            )
+            .await?;
             Ok(ToolOutcome::Continue(json!({"days": days}).to_string()))
         }
         "record_claim" => {
             let statement = required_str(args, "statement")?;
-            let id = store.record_claim(case_id, statement)?;
-            emit(store, tx, case_id, "CLAIM", &format!("C{id} created"))?;
+            let id = {
+                let store = workspace.lock().await;
+                store.record_claim(case_id, statement)?
+            };
+            emit(workspace, tx, case_id, "CLAIM", &format!("C{id} created")).await?;
             let _ = tx.send(ResearchEvent::Claim {
                 id,
                 statement: statement.to_owned(),
@@ -342,49 +390,76 @@ async fn execute_tool(
         }
         "record_evidence" => {
             let source_url = required_str(args, "source_url")?;
-            let source_id = store
-                .source_id_by_url(case_id, source_url)?
-                .ok_or_else(|| anyhow!("source must be scraped before evidence can be recorded"))?;
             let excerpt = required_str(args, "excerpt")?;
             let source_class = required_str(args, "source_class")?;
             let directness = required_str(args, "directness")?;
-            let id = store.record_evidence(
+            let (id, source_id, source) = {
+                let store = workspace.lock().await;
+                let source_id = store
+                    .source_id_by_url(case_id, source_url)?
+                    .ok_or_else(|| anyhow!("source must be scraped before evidence can be recorded"))?;
+                let id = store.record_evidence(
+                    case_id,
+                    source_id,
+                    excerpt,
+                    source_class,
+                    directness,
+                )?;
+                let source = store
+                    .list_sources(case_id)?
+                    .into_iter()
+                    .find(|source| source.id == source_id)
+                    .ok_or_else(|| anyhow!("source was not persisted"))?;
+                (id, source_id, source)
+            };
+            let _ = tx.send(source_event(&source));
+            emit(
+                workspace,
+                tx,
                 case_id,
-                source_id,
-                excerpt,
-                source_class,
-                directness,
-            )?;
-            emit(store, tx, case_id, "EVIDENCE", &format!("E{id} from S{source_id}"))?;
-            Ok(ToolOutcome::Continue(json!({"evidence_id": id}).to_string()))
+                "EVIDENCE",
+                &format!("E{id} from S{source_id}"),
+            )
+            .await?;
+            Ok(ToolOutcome::Continue(
+                json!({"evidence_id": id}).to_string(),
+            ))
         }
         "link_evidence" => {
             let claim_id = required_i64(args, "claim_id")?;
             let evidence_id = required_i64(args, "evidence_id")?;
             let relation = required_str(args, "relation")?;
-            store.link_evidence(claim_id, evidence_id, relation)?;
+            {
+                let store = workspace.lock().await;
+                store.link_evidence(claim_id, evidence_id, relation)?;
+            }
             emit(
-                store,
+                workspace,
                 tx,
                 case_id,
                 "LINK",
                 &format!("E{evidence_id} {relation} C{claim_id}"),
-            )?;
+            )
+            .await?;
             Ok(ToolOutcome::Continue("linked".to_owned()))
         }
         "set_claim_status" => {
             let claim_id = required_i64(args, "claim_id")?;
             let status = required_str(args, "status")?;
             let rationale = required_str(args, "rationale")?;
-            store.set_claim_status(case_id, claim_id, status, rationale)?;
-            let claim = find_claim(store, case_id, claim_id)?;
+            let claim = {
+                let store = workspace.lock().await;
+                store.set_claim_status(case_id, claim_id, status, rationale)?;
+                find_claim(&store, case_id, claim_id)?
+            };
             emit(
-                store,
+                workspace,
                 tx,
                 case_id,
                 "VERIFY",
                 &format!("C{claim_id} → {status}"),
-            )?;
+            )
+            .await?;
             let _ = tx.send(ResearchEvent::Claim {
                 id: claim.id,
                 statement: claim.statement,
@@ -394,19 +469,37 @@ async fn execute_tool(
         }
         "finish_report" => {
             if research_operations == 0 {
-                bail!("a research request cannot finish before at least one external research operation");
+                bail!(
+                    "a research request cannot finish before at least one external research operation"
+                );
             }
             let conclusion = required_str(args, "conclusion")?;
             let limitations = required_str(args, "limitations")?;
-            store.finish_case(case_id, "finished")?;
-            emit(store, tx, case_id, "STOP", "Evidence-driven stop condition reached.")?;
-            let report = build_report(store, case_id, conclusion, limitations)?;
+            {
+                let store = workspace.lock().await;
+                store.finish_case(case_id, "finished")?;
+            }
+            emit(
+                workspace,
+                tx,
+                case_id,
+                "STOP",
+                "Evidence-driven stop condition reached.",
+            )
+            .await?;
+            let report = {
+                let store = workspace.lock().await;
+                build_report(&store, case_id, conclusion, limitations)?
+            };
             Ok(ToolOutcome::Finish(report))
         }
         "reject_request" => {
             let reason = required_str(args, "reason")?;
-            store.finish_case(case_id, "rejected")?;
-            emit(store, tx, case_id, "REJECT", reason)?;
+            {
+                let store = workspace.lock().await;
+                store.finish_case(case_id, "rejected")?;
+            }
+            emit(workspace, tx, case_id, "REJECT", reason).await?;
             Ok(ToolOutcome::Finish(format!(
                 "REJECTED\n\n{reason}\n\nThis request does not require substantive evidence-based investigation."
             )))
@@ -415,7 +508,12 @@ async fn execute_tool(
     }
 }
 
-fn build_report(store: &Store, case_id: &str, conclusion: &str, limitations: &str) -> Result<String> {
+fn build_report(
+    store: &Store,
+    case_id: &str,
+    conclusion: &str,
+    limitations: &str,
+) -> Result<String> {
     let claims = store.list_claims(case_id)?;
     let sources = store.list_sources(case_id)?;
     let mut output = String::new();
@@ -468,20 +566,76 @@ fn build_report(store: &Store, case_id: &str, conclusion: &str, limitations: &st
 
 fn tool_specs() -> Vec<Value> {
     vec![
-        tool("search", "Discover candidate public web sources. Search results are not evidence.", json!({"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":20}},"required":["query"]})),
-        tool("scrape", "Read a candidate source. A source must be scraped before its content can become evidence.", json!({"type":"object","properties":{"url":{"type":"string"}},"required":["url"]})),
-        tool("map", "Map a website to discover relevant URLs.", json!({"type":"object","properties":{"url":{"type":"string"},"search":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":5000}},"required":["url"]})),
-        tool("crawl", "Start a bounded crawl when relevant information is spread across a site.", json!({"type":"object","properties":{"url":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":1000},"max_depth":{"type":"integer","minimum":0,"maximum":10}},"required":["url"]})),
-        tool("crawl_status", "Retrieve the status and current results of a Firecrawl crawl job.", json!({"type":"object","properties":{"id":{"type":"string"}},"required":["id"]})),
-        tool("interact", "Interact with a previously scraped dynamic page using its scrape id.", json!({"type":"object","properties":{"scrape_id":{"type":"string"},"prompt":{"type":"string"}},"required":["scrape_id","prompt"]})),
-        tool("calculator", "Evaluate deterministic arithmetic.", json!({"type":"object","properties":{"expression":{"type":"string"}},"required":["expression"]})),
-        tool("date_days_between", "Calculate the signed number of days between two ISO dates.", json!({"type":"object","properties":{"start":{"type":"string","description":"YYYY-MM-DD"},"end":{"type":"string","description":"YYYY-MM-DD"}},"required":["start","end"]})),
-        tool("record_claim", "Create a material claim in the research workspace. New claims begin UNRESOLVED.", json!({"type":"object","properties":{"statement":{"type":"string"}},"required":["statement"]})),
-        tool("record_evidence", "Record an excerpt as evidence. source_url must already have been scraped in this case.", json!({"type":"object","properties":{"source_url":{"type":"string"},"excerpt":{"type":"string"},"source_class":{"type":"string","enum":["PRIMARY","HIGH_QUALITY_SECONDARY","SECONDARY","WEAK"]},"directness":{"type":"string","enum":["DIRECT","INDIRECT"]}},"required":["source_url","excerpt","source_class","directness"]})),
-        tool("link_evidence", "Link evidence to a material claim.", json!({"type":"object","properties":{"claim_id":{"type":"integer"},"evidence_id":{"type":"integer"},"relation":{"type":"string","enum":["SUPPORTS","CONTRADICTS"]}},"required":["claim_id","evidence_id","relation"]})),
-        tool("set_claim_status", "Update a claim's epistemic state. VERIFIED, SUPPORTED, and DISPROVEN require linked evidence.", json!({"type":"object","properties":{"claim_id":{"type":"integer"},"status":{"type":"string","enum":["VERIFIED","SUPPORTED","UNRESOLVED","CONFLICTING","DISPROVEN","INSUFFICIENT_EVIDENCE","DEAD_END"]},"rationale":{"type":"string"}},"required":["claim_id","status","rationale"]})),
-        tool("finish_report", "Finish only when an evidence-driven stop condition is satisfied. The harness builds the report from structured workspace state.", json!({"type":"object","properties":{"conclusion":{"type":"string"},"limitations":{"type":"string"}},"required":["conclusion","limitations"]})),
-        tool("reject_request", "Reject a request that does not require substantive evidence-based research.", json!({"type":"object","properties":{"reason":{"type":"string"}},"required":["reason"]})),
+        tool(
+            "search",
+            "Discover candidate public web sources. Search results are not evidence.",
+            json!({"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":20}},"required":["query"]}),
+        ),
+        tool(
+            "scrape",
+            "Read a candidate source. A source must be scraped before its content can become evidence.",
+            json!({"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}),
+        ),
+        tool(
+            "map",
+            "Map a website to discover relevant URLs.",
+            json!({"type":"object","properties":{"url":{"type":"string"},"search":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":5000}},"required":["url"]}),
+        ),
+        tool(
+            "crawl",
+            "Start a bounded crawl when relevant information is spread across a site.",
+            json!({"type":"object","properties":{"url":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":1000},"max_depth":{"type":"integer","minimum":0,"maximum":10}},"required":["url"]}),
+        ),
+        tool(
+            "crawl_status",
+            "Retrieve the status and current results of a Firecrawl crawl job.",
+            json!({"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}),
+        ),
+        tool(
+            "interact",
+            "Interact with a previously scraped dynamic page using its scrape id.",
+            json!({"type":"object","properties":{"scrape_id":{"type":"string"},"prompt":{"type":"string"}},"required":["scrape_id","prompt"]}),
+        ),
+        tool(
+            "calculator",
+            "Evaluate deterministic arithmetic.",
+            json!({"type":"object","properties":{"expression":{"type":"string"}},"required":["expression"]}),
+        ),
+        tool(
+            "date_days_between",
+            "Calculate the signed number of days between two ISO dates.",
+            json!({"type":"object","properties":{"start":{"type":"string","description":"YYYY-MM-DD"},"end":{"type":"string","description":"YYYY-MM-DD"}},"required":["start","end"]}),
+        ),
+        tool(
+            "record_claim",
+            "Create a material claim in the research workspace. New claims begin UNRESOLVED.",
+            json!({"type":"object","properties":{"statement":{"type":"string"}},"required":["statement"]}),
+        ),
+        tool(
+            "record_evidence",
+            "Record an excerpt as evidence. source_url must already have been scraped in this case.",
+            json!({"type":"object","properties":{"source_url":{"type":"string"},"excerpt":{"type":"string"},"source_class":{"type":"string","enum":["PRIMARY","HIGH_QUALITY_SECONDARY","SECONDARY","WEAK"]},"directness":{"type":"string","enum":["DIRECT","INDIRECT"]}},"required":["source_url","excerpt","source_class","directness"]}),
+        ),
+        tool(
+            "link_evidence",
+            "Link evidence to a material claim.",
+            json!({"type":"object","properties":{"claim_id":{"type":"integer"},"evidence_id":{"type":"integer"},"relation":{"type":"string","enum":["SUPPORTS","CONTRADICTS"]}},"required":["claim_id","evidence_id","relation"]}),
+        ),
+        tool(
+            "set_claim_status",
+            "Update a claim's epistemic state. VERIFIED and SUPPORTED require supporting evidence; DISPROVEN requires contradicting evidence; CONFLICTING requires both.",
+            json!({"type":"object","properties":{"claim_id":{"type":"integer"},"status":{"type":"string","enum":["VERIFIED","SUPPORTED","UNRESOLVED","CONFLICTING","DISPROVEN","INSUFFICIENT_EVIDENCE","DEAD_END"]},"rationale":{"type":"string"}},"required":["claim_id","status","rationale"]}),
+        ),
+        tool(
+            "finish_report",
+            "Finish only when an evidence-driven stop condition is satisfied. The harness builds the report from structured workspace state.",
+            json!({"type":"object","properties":{"conclusion":{"type":"string"},"limitations":{"type":"string"}},"required":["conclusion","limitations"]}),
+        ),
+        tool(
+            "reject_request",
+            "Reject a request that does not require substantive evidence-based research.",
+            json!({"type":"object","properties":{"reason":{"type":"string"}},"required":["reason"]}),
+        ),
     ]
 }
 
@@ -499,7 +653,9 @@ fn tool(name: &str, description: &str, parameters: Value) -> Value {
 fn parse_arguments(value: Option<&Value>) -> Result<Value> {
     match value {
         Some(Value::String(raw)) if raw.trim().is_empty() => Ok(json!({})),
-        Some(Value::String(raw)) => serde_json::from_str(raw).context("invalid tool arguments JSON"),
+        Some(Value::String(raw)) => {
+            serde_json::from_str(raw).context("invalid tool arguments JSON")
+        }
         Some(Value::Object(_)) => Ok(value.cloned().unwrap_or_else(|| json!({}))),
         Some(other) => Err(anyhow!("unexpected tool arguments: {other}")),
         None => Ok(json!({})),
@@ -552,24 +708,24 @@ fn find_claim(store: &Store, case_id: &str, claim_id: i64) -> Result<ClaimRow> {
 fn source_event(source: &SourceRow) -> ResearchEvent {
     ResearchEvent::Source {
         id: source.id,
-        title: source
-            .title
-            .clone()
-            .unwrap_or_else(|| source.url.clone()),
+        title: source.title.clone().unwrap_or_else(|| source.url.clone()),
         url: source.url.clone(),
         source_class: source.source_class.clone(),
         duplicate_of: source.duplicate_of,
     }
 }
 
-fn emit(
-    store: &Store,
+async fn emit(
+    workspace: &Workspace,
     tx: &UnboundedSender<ResearchEvent>,
     case_id: &str,
     kind: &str,
     message: &str,
 ) -> Result<()> {
-    store.record_event(case_id, kind, message)?;
+    {
+        let store = workspace.lock().await;
+        store.record_event(case_id, kind, message)?;
+    }
     let _ = tx.send(ResearchEvent::Activity {
         kind: kind.to_owned(),
         message: message.to_owned(),
@@ -593,7 +749,8 @@ mod tests {
 
     #[test]
     fn parses_string_tool_arguments() {
-        let args = parse_arguments(Some(&Value::String("{\"query\":\"x\"}".into()))).unwrap();
+        let args =
+            parse_arguments(Some(&Value::String("{\"query\":\"x\"}".into()))).unwrap();
         assert_eq!(args["query"], "x");
     }
 }
