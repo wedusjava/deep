@@ -37,12 +37,11 @@ async fn run_loop(
         app.drain_agent_events();
         terminal.draw(|frame| render::draw(frame, &app))?;
 
-        if event::poll(Duration::from_millis(80))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Release {
-                    app.handle_key(key).await?;
-                }
-            }
+        if event::poll(Duration::from_millis(80))?
+            && let Event::Key(key) = event::read()?
+            && key.kind != KeyEventKind::Release
+        {
+            app.handle_key(key).await?;
         }
     }
     Ok(())
