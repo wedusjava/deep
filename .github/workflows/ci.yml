@@ -6,7 +6,7 @@ on:
   pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   rust:
@@ -18,11 +18,16 @@ jobs:
           components: rustfmt, clippy
       - name: Apply rustfmt
         run: cargo fmt --all
-      - name: Upload formatted source
-        uses: actions/upload-artifact@v4
-        with:
-          name: formatted-source
-          path: src
+      - name: Commit rustfmt output
+        if: github.event_name == 'push' && github.ref != 'refs/heads/main'
+        run: |
+          if ! git diff --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add src
+            git commit -m "style: apply rustfmt"
+            git push
+          fi
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Test
