@@ -630,7 +630,9 @@ fn compact_tool_error(message: &str) -> String {
         .map(str::trim)
         .unwrap_or(message);
     let tool = tool_message.split(':').next().unwrap_or("tool").trim();
-    let prefix = agent_prefix.map(|value| format!("{value} ")).unwrap_or_default();
+    let prefix = agent_prefix
+        .map(|value| format!("{value} "))
+        .unwrap_or_default();
     if let Some(index) = tool_message.find("returned HTTP") {
         let status = tool_message[index + "returned ".len()..]
             .split(':')
